@@ -1,0 +1,7 @@
+build/
+.omc/
+.DS_Store
+*.csv
+wallpaper/previous_wallpaper.txt
+wallpaper/previous_wallpaper_store.plist
+wallpaper/winter-cabin.png
