@@ -52,7 +52,7 @@
 
 ### ⛄ 눈사람과 🚜 제설차
 
-<img src="docs/images/snowplow.png" width="100%" alt="바닥 눈을 미는 제설차와 Dock 위 선물">
+<img src="docs/images/snowplow.png" width="100%" alt="Dock 유리 뒤로 지나가며 눈을 미는 제설차">
 
 - **눈사람 만들기**: 바닥(또는 Dock 위) 눈을 클릭한 채 좌우로 끌면 눈덩이가 굴러가며 커져요. 작은 눈덩이를 큰 눈덩이 위에 놓으면 쌓입니다(최대 3단).
 - **꾸미기**: 2단 이상인 눈사람을 클릭하면 *Fashion week, but colder.* 패널이 열려요. 모자·얼굴·몸·옷을 골라 보세요.
