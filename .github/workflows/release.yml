@@ -1,0 +1,91 @@
+# Builds WinterDesk for macOS (universal) and Windows (x64) and publishes a GitHub Release with
+# both zips, the one-command installers (setup.sh / setup.ps1) and SHA256SUMS.txt.
+# Trigger: push a tag like v1.2.0, or run manually with a tag name (created at the run's commit
+# if it does not exist yet).
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.0); created at this commit if missing'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build universal WinterDesk.app
+        run: ARCHS="arm64 x86_64" ./build.sh
+      - name: Check binary
+        run: |
+          lipo -info build/WinterDesk.app/Contents/MacOS/WinterDesk
+          lipo build/WinterDesk.app/Contents/MacOS/WinterDesk -verify_arch arm64 x86_64
+          codesign --verify --verbose build/WinterDesk.app
+      - name: Zip
+        run: ditto -c -k --keepParent build/WinterDesk.app WinterDesk-macos-universal.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: WinterDesk-macos-universal.zip
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build WinterDesk.exe
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File windows\build.ps1
+      - name: Zip
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Compress-Archive -Path windows\build\WinterDesk.exe, windows\README.md -DestinationPath WinterDesk-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: WinterDesk-windows-x64.zip
+          if-no-files-found: error
+
+  release:
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Collect assets and checksums
+        run: |
+          cp setup.ps1 setup.sh dist/
+          cd dist
+          sha256sum WinterDesk-macos-universal.zip WinterDesk-windows-x64.zip setup.ps1 setup.sh > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          cd dist
+          files=(WinterDesk-macos-universal.zip WinterDesk-windows-x64.zip setup.ps1 setup.sh SHA256SUMS.txt)
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" --title "WinterDesk $TAG" --generate-notes --latest
+          fi

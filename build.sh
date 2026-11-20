@@ -4,16 +4,31 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP="build/WinterDesk.app"
-ARCH="$(uname -m)"
+# Architectures to build: host arch by default; e.g. ARCHS="arm64 x86_64" for a universal binary.
+read -r -a ARCH_LIST <<< "${ARCHS:-$(uname -m)}"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-swiftc -O -swift-version 5 \
-  -target "${ARCH}-apple-macos13.0" \
-  -framework AppKit -framework SpriteKit -framework ServiceManagement -framework ApplicationServices -framework Carbon -framework IOKit \
-  Sources/*.swift \
-  -o "$APP/Contents/MacOS/WinterDesk"
+compile() {  # compile <arch> <output>
+  swiftc -O -swift-version 5 \
+    -target "$1-apple-macos13.0" \
+    -framework AppKit -framework SpriteKit -framework ServiceManagement -framework ApplicationServices -framework Carbon -framework IOKit \
+    Sources/*.swift \
+    -o "$2"
+}
+
+if [ "${#ARCH_LIST[@]}" -eq 1 ]; then
+  compile "${ARCH_LIST[0]}" "$APP/Contents/MacOS/WinterDesk"
+else
+  SLICES=()
+  for A in "${ARCH_LIST[@]}"; do
+    compile "$A" "build/WinterDesk-$A"
+    SLICES+=("build/WinterDesk-$A")
+  done
+  lipo -create "${SLICES[@]}" -output "$APP/Contents/MacOS/WinterDesk"
+  rm -f "${SLICES[@]}"
+fi
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

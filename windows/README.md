@@ -90,6 +90,7 @@ Ctrl+Alt+Shift 조합이 그 배열의 문자 입력과 겹칠 수 있습니다 
 ## 테스트용 메시지 (자동화)
 
 `--test`(또는 `--test-seconds`, `--selftest`)로 실행했을 때만 처리됩니다. 컨트롤 창(클래스 `WinterDeskControl`)에
-`RegisterWindowMessage`로 등록한 이름의 메시지를 보냅니다: `WinterDesk.Test.State`(상태 로그), `WinterDesk.Test.Santa`(산타 바로 출발),
+`RegisterWindowMessage`로 등록한 이름의 메시지를 보냅니다: `WinterDesk.Test.State`(상태 로그), `WinterDesk.Test.Santa`(산타 바로 출발: wParam 0 무작위, 1 날아가기만, 2 착륙; lParam & 3: 1 오른쪽으로, 2 왼쪽으로, lParam >> 2: 비행 높이 화면 y),
 `WinterDesk.Test.Ball`(눈덩이 생성: wParam x, lParam 반지름 pt), `WinterDesk.Test.LightEdit`, `WinterDesk.Test.Command`(wParam = 메뉴 명령 id),
-`WinterDesk.Test.HitTest`(wParam x, lParam y). 결과는 `--log` 로그에 `TEST`/`STATE` 줄로 남고, 플래그 없이 받으면 무시하고 그 사실만 기록합니다.
+`WinterDesk.Test.HitTest`(wParam x, lParam y), `WinterDesk.Test.Snowman`(꾸민 3단 눈사람: wParam 화면 x, lParam 의상 0-3),
+`WinterDesk.Test.Customize`(wParam 화면 x에 가장 가까운 눈사람의 꾸미기 패널 열기). 결과는 `--log` 로그에 `TEST`/`STATE` 줄로 남고, 플래그 없이 받으면 무시하고 그 사실만 기록합니다.

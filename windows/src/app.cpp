@@ -214,7 +214,7 @@ private:
     bool lightEdit_ = false;
     bool testMode_ = false, needShow_ = false, lastPrimaryDown_ = false;
     double primaryUpSince_ = -1, retryDelay_ = 5;
-    UINT msgState_ = 0, msgSanta_ = 0, msgBall_ = 0, msgEdit_ = 0, msgCommand_ = 0, msgHit_ = 0;
+    UINT msgState_ = 0, msgSanta_ = 0, msgBall_ = 0, msgEdit_ = 0, msgCommand_ = 0, msgHit_ = 0, msgSnowman_ = 0, msgCustomize_ = 0;
     std::vector<SavedGift> savedGifts_;
     bool haveSaved_ = false, defaultGiftRemovedThisSession_ = false;
     std::vector<SavedRider> pendingRiders_;
@@ -272,6 +272,8 @@ int App::Run(HINSTANCE inst, bool safe, const std::wstring& safeWhy, double test
     msgEdit_ = RegisterWindowMessageW(L"WinterDesk.Test.LightEdit");
     msgCommand_ = RegisterWindowMessageW(L"WinterDesk.Test.Command");
     msgHit_ = RegisterWindowMessageW(L"WinterDesk.Test.HitTest");
+    msgSnowman_ = RegisterWindowMessageW(L"WinterDesk.Test.Snowman");
+    msgCustomize_ = RegisterWindowMessageW(L"WinterDesk.Test.Customize");
     haveSaved_ = LoadGifts(savedGifts_);
     pendingRiders_ = LoadRiders();
     pendingLinks_ = LoadLinks();
@@ -1191,10 +1193,16 @@ void App::Command(UINT id)
 LRESULT App::CtlProc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
     if (m == wmTaskbarCreated_ && m != 0) { AddTray(); return 0; }
-    if (m != 0 && (m == msgState_ || m == msgSanta_ || m == msgBall_ || m == msgEdit_ || m == msgCommand_ || m == msgHit_)) {
+    if (m != 0 && (m == msgState_ || m == msgSanta_ || m == msgBall_ || m == msgEdit_ || m == msgCommand_ || m == msgHit_ || m == msgSnowman_ || m == msgCustomize_)) {
         if (!testMode_) { Logf(L"automation message ignored (start with --test to enable)"); return 0; }
         if (m == msgState_) { if (scene_) Logf(L"STATE %s", scene_->StateLine().c_str()); }
-        else if (m == msgSanta_) { if (scene_) scene_->ForceSantaPass(); }
+        else if (m == msgSanta_ && scene_) {
+            // w: 0 random, 1 fly over, 2 land; l & 3: 1 right, 2 left; l >> 2: cruise height (screen y, 0 = random)
+            int dir = (l & 3) == 1 ? 1 : ((l & 3) == 2 ? -1 : 0), cy = (int)(l >> 2);
+            scene_->ForceSantaPass((int)w - 1, dir, cy ? (float)(cy - disp_.bounds.top) : 0.f);
+        }
+        else if (m == msgSnowman_) { if (scene_) scene_->TestSnowman((float)((int)w - disp_.bounds.left), (int)l); }
+        else if (m == msgCustomize_) { if (scene_) Logf(L"TEST customize open %d", scene_->TestOpenCustomizer((float)((int)w - disp_.bounds.left)) ? 1 : 0); }
         else if (m == msgBall_) { if (scene_) { Ball* b = scene_->SpawnTestBall((float)w, (float)l); Logf(L"TEST spawned ball %d", b ? 1 : 0); } }
         else if (m == msgEdit_) ToggleLightEdit();
         else if (m == msgCommand_) Command((UINT)w);

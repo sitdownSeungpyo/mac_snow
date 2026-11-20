@@ -875,9 +875,32 @@ std::vector<SavedRider> Scene::RestoreRiders(const std::vector<SavedRider>& save
     return rest;
 }
 
-void Scene::ForceSantaPass()
+void Scene::ForceSantaPass(int land, int dir, float cruiseY)
 {
-    if (santa_.phase == SantaObj::Waiting) santa_.timer = 0;
+    Logf(L"TEST santa pass forced (phase %d, land %d, dir %d, y %.0f)", (int)santa_.phase, land, dir, cruiseY);
+    if (santa_.phase == SantaObj::Held) return;
+    santa_.phase = SantaObj::Waiting;   // restarts a pass already under way (StartSantaPass resets it)
+    forceSantaLand_ = land;
+    forceSantaDir_ = dir;
+    forceSantaY_ = cruiseY;
+    santa_.timer = 0;
+}
+
+void Scene::TestSnowman(float x, int preset)
+{
+    static const Outfit kPresets[] = {{2, 1, 1, 2}, {3, 2, 2, 3}, {1, 0, 1, 1}, {4, 3, 3, 4}};
+    Outfit o = kPresets[((preset % 4) + 4) % 4];
+    PlaceSnowman(Clampf(x, 30 * S, W - 30 * S), {20, 15, 10}, o, nullptr, 0);
+    Logf(L"TEST snowman placed at x=%.0f outfit %S", x, o.Key().c_str());
+}
+
+bool Scene::TestOpenCustomizer(float x)
+{
+    Ball* best = nullptr;
+    for (const auto& b : balls_)
+        if (!b->below && b->above && (!best || std::fabs(b->x - x) < std::fabs(best->x - x))) best = b.get();
+    if (best) OpenCustomizer(best);
+    return best != nullptr;
 }
 
 Ball* Scene::SpawnTestBall(float x, float rPt)
@@ -1819,12 +1842,15 @@ void Scene::OpenGift(GiftObj* g)
 void Scene::StartSantaPass()
 {
     SantaObj& s = santa_;
-    s.dir = RandInt(2) == 0 ? 1.f : -1.f;
-    s.cruiseY = H * Rand(0.15f, 0.4f);                       // y-up 60-85% of the height
+    s.dir = forceSantaDir_ != 0 ? (float)forceSantaDir_ : (RandInt(2) == 0 ? 1.f : -1.f);
+    forceSantaDir_ = 0;
+    s.cruiseY = forceSantaY_ > 0 ? Clampf(forceSantaY_, 60 * S, H * 0.6f) : H * Rand(0.15f, 0.4f);   // y-up 60-85% of the height
+    forceSantaY_ = 0;
     s.x = s.dir > 0 ? -210 * S : W + 210 * S;
     s.y = s.cruiseY;
     s.velocity = 150 * S;
-    s.willLand = Rand01() < 0.5;
+    s.willLand = forceSantaLand_ >= 0 ? forceSantaLand_ == 1 : Rand01() < 0.5;
+    forceSantaLand_ = -1;
     float touchdown = s.dir > 0 ? W * 0.2f : W * 0.8f;
     s.descendStartX = touchdown - s.dir * 320 * S;
     s.dropPlanned = Rand01() < kSantaGiftDropChance;

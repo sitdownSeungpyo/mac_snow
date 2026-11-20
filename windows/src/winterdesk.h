@@ -539,7 +539,9 @@ public:
     std::vector<SavedRider> SnapshotRiders() const;
     /// Places saved riders on matching windows; returns those that found no window.
     std::vector<SavedRider> RestoreRiders(const std::vector<SavedRider>& saved);
-    void ForceSantaPass();             // test hook
+    void ForceSantaPass(int land = -1, int dir = 0, float cruiseY = 0);   // test hook: land -1 random, 0 fly over, 1 land; dir/cruiseY 0 random
+    void TestSnowman(float x, int preset);   // test hook: decorated 3-tier snowman on the ground at x
+    bool TestOpenCustomizer(float x);        // test hook: opens the panel for the snowman nearest x
     std::wstring StateLine() const;    // test hook: object positions for the log
     Ball* SpawnTestBall(float x, float rPt);   // test hook
 
@@ -698,6 +700,8 @@ private:
     bool anyMoving_ = false;
     bool capsChanged_ = false;
     bool wantDefaultSnowman_ = false;
+    int forceSantaLand_ = -1, forceSantaDir_ = 0;   // test hook
+    float forceSantaY_ = 0;                         // test hook
     bool liveDragging_ = false;
     int flakeSizePx_[4] = {2, 3, 4, 6};
 
