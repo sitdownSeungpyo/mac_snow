@@ -97,6 +97,21 @@ enum WindowTracker {
         return list.first { ($0[kCGWindowNumber as String] as? Int) == id }
     }
 
+    /// Every window's CGWindowList entry by id, from one call (on and off screen).
+    static func infoByID() -> [Int: [String: Any]] {
+        guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else { return [:] }
+        var out: [Int: [String: Any]] = [:]
+        for i in list { if let n = i[kCGWindowNumber as String] as? Int { out[n] = i } }
+        return out
+    }
+
+    /// Pure: a window missing from the on-screen list is gone NOW (no debounce) when destroyed
+    /// (no entry at all), or ordered out / faded out right after a close signal for it.
+    static func confirmedGone(_ info: [String: Any]?, closeSignal: Bool) -> Bool {
+        guard info != nil else { return true }
+        return closeSignal && reallyGone(info)
+    }
+
     /// Pure: a window missing from the on-screen list is really gone (closed, ordered out, faded
     /// out) — not just transiently unlisted — when its own entry is missing, off screen or fully
     /// transparent. Only an entry that is still on screen and visible keeps the debounce.

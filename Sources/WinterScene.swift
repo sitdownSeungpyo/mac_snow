@@ -242,8 +242,14 @@ final class WinterScene: SKScene {
     /// slides the cap off; a z-order-only change just updates occlusion.
     func setAppWindows(_ windows: [AppWindow]) { setAppWindows(windows, poll: true) }
 
+    /// A poll, plus the ids the app confirmed gone (destroyed, or ordered out right after a close
+    /// gesture): after window-number churn adoption they skip the ghost wait and go at once.
+    func setAppWindows(_ windows: [AppWindow], confirmedGone: Set<Int>) {
+        setAppWindows(windows, poll: true, confirmedGone: confirmedGone)
+    }
+
     /// `poll` = false: a re-run with the current windows (no new list), ghosts stay as they are.
-    private func setAppWindows(_ windows: [AppWindow], poll: Bool) {
+    private func setAppWindows(_ windows: [AppWindow], poll: Bool, confirmedGone: Set<Int> = []) {
         // Defensive: never build anything from a non-finite or absurd frame.
         let list = windows.filter { w in
             let f = w.frame
@@ -287,6 +293,11 @@ final class WinterScene: SKScene {
                 Diag.shared.row("ghostBack", id: id, note: "listed again (kept everything)")
             }
             for w in previous where !rawIDs.contains(w.id) && trackedFrames[w.id] != nil {
+                if confirmedGone.contains(w.id) {
+                    missing[w.id] = nil
+                    Diag.shared.row("goneConfirmed", id: w.id, rect: w.frame, note: "no ghost wait (destroyed / closed)")
+                    continue
+                }
                 var m = missing[w.id] ?? (elapsed, 0, w)
                 m.polls += 1
                 if m.polls >= WinterScene.goneConfirmPolls && elapsed - m.since >= WinterScene.goneConfirmTime {
@@ -355,11 +366,32 @@ final class WinterScene: SKScene {
         settleWindows()
         refreshOccluders()
         lights.suppressed = unsettled
-        // User links whose window disappeared are removed; a drag whose source vanished is cancelled.
+        // User links whose window disappeared are PARKED (by owner + window rank, like saved links)
+        // and come back when both windows are listed again: a window that vanishes by mistake, or
+        // closes and reopens, never loses the user's links. A drag whose source vanished is cancelled.
         let ids = Set(list2.map { $0.id })
-        let before = userLinks.count
-        userLinks.removeAll { !ids.contains($0.a.window) || !ids.contains($0.b.window) }
-        if userLinks.count != before { onUserLinksChanged?() }
+        let gone = userLinks.filter { !ids.contains($0.a.window) || !ids.contains($0.b.window) }
+        var linksChanged = false
+        if !gone.isEmpty {
+            let known = previous + list2
+            for p in LightLinkStore.save(gone, windows: known) where !parkedLinks.contains(p) { parkedLinks.append(p) }
+            if parkedLinks.count > LightLinkStore.maxLinks { parkedLinks.removeFirst(parkedLinks.count - LightLinkStore.maxLinks) }
+            userLinks.removeAll { l in gone.contains { $0.same(as: l) } }
+            Diag.shared.row("linksParked", note: "\(gone.count) link(s) parked until their windows return")
+            linksChanged = true
+        }
+        if !parkedLinks.isEmpty {
+            let r = LightLinkStore.resolve(parkedLinks, windows: decoratedWindows)
+            var restored = 0
+            for l in r.links where LightLinkStore.validate(l, existing: userLinks, windows: appWindows, visible: { _ in true }) == .added {
+                userLinks.append(l); restored += 1
+            }
+            if !r.links.isEmpty {
+                parkedLinks = r.unresolved
+                if restored > 0 { Diag.shared.row("linksRestored", note: "\(restored) parked link(s) back"); linksChanged = true }
+            }
+        }
+        if linksChanged { onUserLinksChanged?() }
         if let src = linkDrag, !ids.contains(src.window) { cancelLinkDrag() }
         syncLights()
         if lightEditMode { refreshAnchorDots() }
@@ -2083,6 +2115,9 @@ final class WinterScene: SKScene {
     var autoLightLinks = true { didSet { if autoLightLinks != oldValue { syncLights() } } }
     var windowGarlands = true { didSet { if windowGarlands != oldValue { syncLights() } } }
     private(set) var userLinks: [UserLink] = []
+    /// Links whose window(s) are gone for now (owner + rank); saved with the others, restored
+    /// when both windows are listed again.
+    private(set) var parkedLinks: [SavedLightLink] = []
     var onUserLinksChanged: (() -> Void)?
     /// Called when a link drag ends (added / rejected with a reason / nil = cancelled).
     var onLinkResult: ((LinkResult?) -> Void)?

@@ -16,6 +16,14 @@ struct SwitchGesture {
     static let maxHidden: TimeInterval = 0.6
 
     private(set) var phase: Phase = .idle
+
+    static let wKey: UInt16 = 13            // kVK_ANSI_W
+    static let escapeKey: UInt16 = 53       // kVK_Escape
+    /// ⌘W (close window) or Esc (closes e.g. KakaoTalk chat windows): a fresh close signal for the
+    /// front app. Only the key code is looked at.
+    static func isCloseGesture(keyCode: UInt16, command: Bool) -> Bool {
+        (keyCode == wKey && command) || keyCode == escapeKey
+    }
     var hiding: Bool { phase != .idle }
 
     /// A key went down. Returns true when caps must hide now (the gesture armed).
@@ -52,5 +60,20 @@ struct SwitchGesture {
         default:
             return false
         }
+    }
+}
+
+/// Recent close signals: when (uptime) a window or an app last got one. Nothing else is kept.
+struct CloseSignals {
+    static let freshness: TimeInterval = 0.5
+    var window: [Int: TimeInterval] = [:]
+    var app: [Int: TimeInterval] = [:]
+    /// A close signal for this window or its app within `freshness`; prunes old ones.
+    mutating func recent(window id: Int, pid: Int, now: TimeInterval) -> Bool {
+        window = window.filter { now - $0.value < 5 }
+        app = app.filter { now - $0.value < 5 }
+        if let t = window[id], now - t <= CloseSignals.freshness { return true }
+        if pid != 0, let t = app[pid], now - t <= CloseSignals.freshness { return true }
+        return false
     }
 }

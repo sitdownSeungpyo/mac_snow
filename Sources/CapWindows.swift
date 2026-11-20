@@ -436,6 +436,14 @@ final class CapWindowManager {
         Diag.shared.row("capWindow", id: w.id, rect: b, note: "create cap=\(c.windowNumber) level=\(level) mode=\(ordering.rawValue) order=\(err)")
     }
 
+    /// A cap ordered out by a close event whose window is still there: back in (reveal gate).
+    func reshow(_ id: Int, reason: String) {
+        guard let c = caps[id], !(c.owner?.isPaused ?? true) else { return }
+        c.skView.isPaused = false
+        c.orderInRevealing(reason)
+        Diag.shared.row("capShow", id: id, note: reason)
+    }
+
     func remove(_ id: Int, reason: String) {
         guard let c = caps.removeValue(forKey: id) else { return }
         CapMover.shared.remove(target: id)

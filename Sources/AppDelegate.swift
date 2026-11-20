@@ -166,12 +166,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else if event == SkyLightEvents.eventClose {
             liveMonitor.forget(wid)
         }
-        guard trackingMode == .live, let i = lastWindowList.firstIndex(where: { $0.id == wid }) else { return }
         if event == SkyLightEvents.eventClose {
+            // The cap is already out (callback thread). The close is a fresh close signal for this
+            // window: the poll right now confirms it gone — after the scene's churn adoption (an
+            // app replacing the window keeps its snow). If the window is still listed after the
+            // poll, the close was not a destroy: its cap comes back.
             let us = CapMover.shared.takeCloseLatency(wid)
-            vanish(wid, reason: us.map { String(format: "close event (cap out in callback %.0fµs)", $0) } ?? "close event")
-            lastWindowPoll = 0; pollWindows(); return
+            closeSignals.window[wid] = now
+            Diag.shared.row("closeEvent", id: wid, note: us.map { String(format: "cap out in callback %.0fµs", $0) } ?? "no cap")
+            lastWindowPoll = 0; pollWindows()
+            if lastWindowList.contains(where: { $0.id == wid }) {
+                CapMover.shared.reopen(wid)
+                capManager.reshow(wid, reason: "close event but still listed")
+            }
+            return
         }
+        guard trackingMode == .live, let i = lastWindowList.firstIndex(where: { $0.id == wid }) else { return }
         guard let r = SkyLightEvents.shared.bounds(of: wid) else { return }
         let primaryHeight = NSScreen.screens.first?.frame.maxY ?? 0
         let f = CGRect(x: r.minX, y: primaryHeight - r.maxY, width: r.width, height: r.height)
@@ -194,6 +204,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private var lastEventBounds: [Int: (frame: CGRect, t: TimeInterval)] = [:]
+    /// Recent close gestures (time only; no key characters): per window and per app.
+    private var closeSignals = CloseSignals()
 
     /// Z-order changed (reorder event, app activation, a click): re-read the window list now and
     /// once more shortly after, so cap masks follow the new order within ~30ms instead of a poll.
@@ -229,6 +241,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let cmd = e.modifierFlags.contains(.command)
         switch e.type {
         case .keyDown:
+            if SwitchGesture.isCloseGesture(keyCode: e.keyCode, command: cmd), let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier {
+                closeSignals.app[Int(pid)] = ProcessInfo.processInfo.systemUptime
+                Diag.shared.row("closeGesture", note: "key close gesture (front app pid \(pid))")
+                promptPoll(reason: "close gesture")
+            }
             if switchGesture.keyDown(keyCode: e.keyCode, command: cmd) {
                 capManager.setSwitchHidden(true, reason: "switch gesture armed")
                 Diag.shared.row("switchGesture", note: "armed")
@@ -766,15 +783,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let snap = wanted ? WindowTracker.snapshotWithPopups(ownWindows: own) : (windows: [AppWindow](), popups: [CGRect](), popupRanks: [Int]())
         let all = snap.windows
         lastPopups = snap.popups
-        // A window missing from this poll: look it up by id (≈0.1ms). Closed / ordered out /
-        // faded out → everything on it goes NOW (apps that hide a window instead of destroying it
-        // send no close event; live: KakaoTalk chat windows lost their snow "one beat late").
-        // Still on screen and visible → only transiently unlisted: the scene's debounce keeps it.
+        // Windows missing from this poll (one batched lookup of every window, ≈0.3ms): confirmed
+        // gone — no ghost wait — when destroyed (the id no longer exists), or when ordered out /
+        // faded out within `CloseSignals.freshness` of a close signal for it or its app (⌘W / Esc, a
+        // release on its close-button corner, a close event). Everything else (on screen but
+        // unlisted, or off screen without a close signal: Space / app-switch animations) keeps
+        // the scene's debounce. The scene decides after its window-number churn adoption.
+        let t0 = DispatchTime.now().uptimeNanoseconds
         let listed = Set(all.map { $0.id })
-        for w in lastWindowList where wanted && !listed.contains(w.id) {
-            let t0 = DispatchTime.now().uptimeNanoseconds
-            guard WindowTracker.reallyGone(WindowTracker.info(of: w.id)) else { continue }
-            vanish(w.id, reason: String(format: "gone from the window list (targeted check, hidden in %.0fµs)", Double(DispatchTime.now().uptimeNanoseconds - t0) / 1000))
+        let missingNow = wanted ? lastWindowList.filter { !listed.contains($0.id) } : []
+        var confirmedGone = Set<Int>()
+        if !missingNow.isEmpty {
+            let infos = WindowTracker.infoByID()
+            for w in missingNow {
+                let info = infos[w.id]
+                let signal = closeSignals.recent(window: w.id, pid: w.pid, now: now)
+                if WindowTracker.confirmedGone(info, closeSignal: signal) {
+                    confirmedGone.insert(w.id)
+                    Diag.shared.row("goneDetected", id: w.id, rect: w.frame, note: info == nil ? "destroyed" : "ordered out after a close signal")
+                }
+            }
         }
         if all != lastWindowList {
             let old = Dictionary(lastWindowList.map { ($0.id, $0.frame) }, uniquingKeysWith: { a, _ in a })
@@ -795,10 +823,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let pops = zip(lastPopups, snap.popupRanks).filter { $0.0.intersects(sf) }
             w.scene.occluderPopups = pops.map { $0.0.offsetBy(dx: -sf.minX, dy: -sf.minY) }
             w.scene.occluderPopupRanks = pops.map { $0.1 }
-            w.scene.setAppWindows(WindowTracker.local(all, in: w.hostScreen.frame))
+            w.scene.setAppWindows(WindowTracker.local(all, in: w.hostScreen.frame), confirmedGone: confirmedGone)
         }
         capManager.reconcile(overlays: overlays, windows: all,
                              enabled: wanted && trackingMode == .live && effectsOn && defaults.object(forKey: "capWindows") as? Bool ?? true)
+        if !confirmedGone.isEmpty {
+            // Latency from the poll's lookup to strip, riders, lights and cap window removed.
+            Diag.shared.row("goneHidden", note: String(format: "%@ hidden %.0fµs after detection", confirmedGone.sorted().map(String.init).joined(separator: " "),
+                                                       Double(DispatchTime.now().uptimeNanoseconds - t0) / 1000))
+        }
         if now - lastPollHeartbeat >= 10 {
             // Heartbeat: an absent row in a live diag means the poll itself stopped.
             lastPollHeartbeat = now
@@ -978,7 +1011,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func saveLinks() {
         var all: [SavedLightLink] = []
-        for w in overlays { all += LightLinkStore.save(w.scene.userLinks, windows: w.scene.currentWindows) }
+        for w in overlays {
+            all += LightLinkStore.save(w.scene.userLinks, windows: w.scene.currentWindows)
+            for p in w.scene.parkedLinks where !all.contains(p) { all.append(p) }      // never erased by a vanish
+        }
         for p in pendingLinks where !all.contains(p) { all.append(p) }
         if let data = try? JSONEncoder().encode(Array(all.prefix(LightLinkStore.maxLinks))) {
             defaults.set(data, forKey: AppDelegate.userLinksKey)
@@ -1067,7 +1103,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             pendingGrab = nil
             // A release on a window's close-button corner: look at the window list right away.
             let m = NSEvent.mouseLocation
-            if lastWindowList.contains(where: { CGRect(x: $0.frame.minX, y: $0.frame.maxY - 30, width: 70, height: 30).contains(m) }) {
+            if let w = lastWindowList.sorted(by: { $0.order < $1.order }).first(where: { CGRect(x: $0.frame.minX, y: $0.frame.maxY - 30, width: 70, height: 30).contains(m) }) {
+                closeSignals.window[w.id] = ProcessInfo.processInfo.systemUptime
                 promptPoll(reason: "mouse-up on a close-button corner")
             }
         }

@@ -356,10 +356,15 @@ final class CapMover {
         let sls = SkyLightEvents.shared
         _ = sls.orderWindow?(sls.connection, e.cap, 0, 0)
         let us = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1000
-        lock.lock(); entries[target]?.vanished = true; closedInCallback[target] = us; lock.unlock()
+        lock.lock(); entries[target]?.vanished = true; vanishedCount += 1; closedInCallback[target] = us; lock.unlock()
         return us
     }
     private var closedInCallback: [UInt32: Double] = [:]
+    /// The close was not a destroy (the window is still listed): follow it again.
+    func reopen(_ target: Int) {
+        guard let t = UInt32(exactly: target) else { return }
+        lock.lock(); entries[t]?.vanished = false; closedInCallback[t] = nil; lock.unlock()
+    }
     /// µs the callback took to order out the cap of `target` on its close event (taken once).
     func takeCloseLatency(_ target: Int) -> Double? {
         guard let t = UInt32(exactly: target) else { return nil }
