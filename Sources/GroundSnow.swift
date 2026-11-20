@@ -102,6 +102,10 @@ final class GroundSnow: SKNode {
     }
 
     private var dockCorner: CGFloat = 16
+    /// A Dock was set before (a returning Dock starts with an empty cap).
+    private var dockSeen = false
+    /// Dock-cap snow poured to the floor because the Dock went away (diag / harness).
+    private(set) var dockGoneSpill: CGFloat = 0
 
     func setDock(_ band: DockBand?) {
         let c = clamp(band?.corner ?? 16, 8, 26)
@@ -122,8 +126,16 @@ final class GroundSnow: SKNode {
                 if onDock {
                     floorUnder[i] = heights[i] > 0 ? heights[i] : floorStartHeight(i)
                     isDock[i] = true
-                    heights[i] = startHeight(i)
+                    // A Dock that comes back starts with an empty cap and gathers snow again; the
+                    // Dock seen at start-up gets its usual thin line.
+                    heights[i] = dockSeen ? 0 : startHeight(i)
                 } else {
+                    // The Dock went away under this column (hidden / auto-hide / full screen /
+                    // narrower): its cap snow pours down onto the floor as grains (volume kept).
+                    if heights[i] > 0.01 {
+                        dockSpill.append((CGFloat(i) * colWidth, base[i] + heights[i], heights[i] * colWidth))
+                        dockGoneSpill += heights[i] * colWidth
+                    }
                     isDock[i] = false
                     heights[i] = floorUnder[i] > 0 ? floorUnder[i] : startHeight(i)
                     floorUnder[i] = 0
@@ -135,6 +147,7 @@ final class GroundSnow: SKNode {
                 dirty = true
             }
         }
+        if band != nil { dockSeen = true }
     }
 
     func baseHeight(at x: CGFloat) -> CGFloat { base[col(x)] }
@@ -268,6 +281,46 @@ final class GroundSnow: SKNode {
         if area > 0 { dirty = true; cooldown = min(cooldown, 0.1) }
         return area
     }
+
+    /// Like `scrape`, on the floor layer (also behind the Dock): the plow never climbs the Dock.
+    @discardableResult
+    func scrapeFloor(at x: CGFloat, dir: CGFloat, keep: CGFloat, maxArea: CGFloat) -> CGFloat {
+        guard x.isFinite, dir.isFinite, maxArea > 0 else { return 0 }
+        let c = col(x)
+        var area: CGFloat = 0
+        for i in [c, c - Int(dir)] where i >= 0 && i < count {
+            let take = min(max(0, floorH(i) - keep) * 0.5, (maxArea - area) / colWidth)
+            guard take > 0 else { continue }
+            setFloor(i, floorH(i) - take)
+            area += take * colWidth
+        }
+        if area > 0 { dirty = true; cooldown = min(cooldown, 0.1) }
+        return area
+    }
+
+    /// Like `depositDrift`, on the floor layer (a mound behind the Dock settles by the floor's
+    /// angle of repose like anywhere else).
+    func depositDriftFloor(fromX x: CGFloat, dir: CGFloat, length: CGFloat, area: CGFloat) {
+        guard x.isFinite, length > 1, area > 0 else { return }
+        let n = max(2, Int(length / colWidth))
+        var weights: [CGFloat] = []
+        for k in 0..<n { weights.append(pow(1 - CGFloat(k) / CGFloat(n), 1.5)) }
+        let total = weights.reduce(0, +)
+        let c0 = col(x)
+        var placed: CGFloat = 0
+        for (k, wgt) in weights.enumerated() {
+            let i = c0 + Int(dir) * k
+            guard i >= 0, i < count else { continue }
+            setFloor(i, floorH(i) + area * wgt / total / colWidth)
+            placed += area * wgt / total
+        }
+        if placed < area { setFloor(c0, floorH(c0) + (area - placed) / colWidth) }   // (off-screen part)
+        dirty = true
+    }
+
+    /// Floor + Dock-cap volume (pt²), harness accounting.
+    var floorVolume: CGFloat { (0..<count).reduce(0) { $0 + floorH($1) } * colWidth }
+    var dockCapVolume: CGFloat { (0..<count).filter { isDock[$0] }.reduce(0) { $0 + heights[$1] } * colWidth }
 
     /// Lays a plow drift down as a mound: `area` pt² along [x, x + dir·length] with the drift's
     /// wedge profile (tallest at the blade). Relaxation then lets it settle slowly.

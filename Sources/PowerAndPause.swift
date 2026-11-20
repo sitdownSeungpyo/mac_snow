@@ -49,6 +49,22 @@ final class PowerMonitor {
 
 /// Which screens are covered by a full-screen app (or any screen-sized normal-layer window of
 /// another app): the effects pause there.
+/// A boolean that flips only after `needed` consecutive readings of the other value (pure).
+struct Debounced {
+    private(set) var value: Bool
+    let needed: Int
+    private(set) var streak = 0
+    init(_ value: Bool, needed: Int) { self.value = value; self.needed = needed }
+    /// Feeds one reading; returns true when `value` flipped.
+    mutating func feed(_ v: Bool) -> Bool {
+        guard v != value else { streak = 0; return false }
+        streak += 1
+        guard streak >= needed else { return false }
+        value = v; streak = 0
+        return true
+    }
+}
+
 enum FullscreenDetector {
     /// Screen frames in CG global coordinates (top-left origin).
     static func cgFrame(of screen: CGRect, primaryHeight h: CGFloat) -> CGRect {

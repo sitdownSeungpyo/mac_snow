@@ -34,5 +34,5 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-codesign --force -s - "$APP"
+codesign --force -s - --identifier com.local.winterdesk "$APP"
 echo "Built $APP"

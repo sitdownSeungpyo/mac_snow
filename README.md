@@ -84,10 +84,15 @@ cd mac_snow
 ```
 </details>
 
-<details>
-<summary><b>권한 (선택)</b></summary>
+<details open>
+<summary><b>권한 (권장): 손쉬운 사용</b></summary>
 
-메뉴 → **Grant Accessibility for Dock snow**로 손쉬운 사용 권한을 주면 Dock의 정확한 위치를 읽어 Dock 위 눈이 딱 맞게 쌓입니다. 허용하지 않아도 위치를 추정해서 동작합니다.
+메뉴 → **Grant Accessibility (Dock snow + no ⌘Tab flash)** → 시스템 설정 › 개인정보 보호 및 보안 › 손쉬운 사용에서 WinterDesk를 켜 주세요.
+
+- <kbd>⌘Tab</kbd>으로 앱을 바꿀 때 창 위 눈이 번쩍이지 않도록, 전환 직전에 눈을 숨겼다가 전환이 끝나면 서서히 보여 줍니다. (⌘+Tab 조합만 확인하고, 입력한 키는 기록하지 않아요.)
+- Dock의 정확한 위치를 읽어 Dock 위 눈이 딱 맞게 쌓이고, 전체화면에서 Dock이 사라지면 Dock 위 눈이 바닥으로 쏟아집니다.
+
+> 개인용(ad-hoc) 서명 앱이라 **다시 빌드·설치하면 권한이 풀릴 수 있어요.** ⌘Tab 번쩍임이 다시 보이면 목록에서 WinterDesk를 `−`로 지우고 `+`로 다시 추가해 켜 주세요.
 </details>
 
 ## 🎛️ 사용법

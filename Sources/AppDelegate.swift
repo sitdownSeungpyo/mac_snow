@@ -26,6 +26,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastForcedPoll: TimeInterval = 0
     static let titleBand: CGFloat = 40
     private var mouseMonitor: Any?
+    /// ⌘Tab / ⌘` detection (only with Accessibility): key codes and the ⌘ flag only — never characters.
+    private var keyMonitor: Any?
+    private var switchGesture = SwitchGesture()
+    private var lastAXCheck: TimeInterval = 0
     private var lastWindowChange: TimeInterval = 0
     private var lastWindowPoll: TimeInterval = 0
     private let defaults = UserDefaults.standard
@@ -95,6 +99,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var dragSnowItems: [NSMenuItem] = []
     private let powerItem = NSMenuItem(title: "절전: 켜짐", action: nil, keyEquivalent: "")
     private var lastFullscreenCheck: TimeInterval = 0
+    private var fullscreenState: [Int: Debounced] = [:]
+    private var promptPollPending = false
     private var lastPollHeartbeat: TimeInterval = 0
     /// "창 끌 때 눈": true = 미끄러져 떨어짐 (default), false = 붙어 있음.
     private var dragSnowSlides: Bool {
@@ -118,6 +124,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func pushNonLive() {
+        if let w = overlays.first, w.scene.nonLiveWindows != liveMonitor.nonLive {
+            Diag.shared.row("nonLive", note: "\(w.scene.nonLiveWindows.sorted())→\(liveMonitor.nonLive.sorted())")
+        }
         for w in overlays where w.scene.nonLiveWindows != liveMonitor.nonLive { w.scene.nonLiveWindows = liveMonitor.nonLive }
     }
 
@@ -144,7 +153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// A SkyLight move/resize/close event (main thread): bounded work, update that window now.
     private func windowEvent(_ event: UInt32, _ wid: Int) {
-        if event == SkyLightEvents.eventReorder { capManager.reorderEvent(); return }   // z-order only
+        if event == SkyLightEvents.eventReorder { capManager.reorderEvent(); promptPoll(reason: "reorder"); return }   // z-order only
         let now = ProcessInfo.processInfo.systemUptime
         Diag.shared.row("slsEvent", id: wid, note: "type=\(event)")
         if event != SkyLightEvents.eventClose && liveTrackingEnabled {
@@ -181,6 +190,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private var lastEventBounds: [Int: (frame: CGRect, t: TimeInterval)] = [:]
+
+    /// Z-order changed (reorder event, app activation, a click): re-read the window list now and
+    /// once more shortly after, so cap masks follow the new order within ~30ms instead of a poll.
+    private func promptPoll(reason: String) {
+        guard !promptPollPending else { return }
+        promptPollPending = true
+        Diag.shared.row("promptPoll", note: reason)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in
+            guard let self else { return }
+            self.promptPollPending = false
+            self.lastWindowPoll = 0; self.pollWindows()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in self?.lastWindowPoll = 0; self?.pollWindows() }
+        }
+    }
+
+    /// Installs the key monitor as soon as Accessibility is granted (no restart), removes it if revoked.
+    private func updateKeyMonitor() {
+        let trusted = AXIsProcessTrusted()
+        if trusted && keyMonitor == nil && mouseMonitor != nil {
+            keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { [weak self] e in self?.switchKey(e) }
+            Diag.shared.row("switchGesture", note: "monitor installed (Accessibility granted)")
+        } else if !trusted, let k = keyMonitor {
+            NSEvent.removeMonitor(k); keyMonitor = nil
+            Diag.shared.row("switchGesture", note: "monitor removed (Accessibility revoked)")
+        }
+        axItem.state = trusted ? .on : .off
+    }
+
+    /// ⌘Tab / ⌘⇧Tab / ⌘`: hide every cap the moment the gesture arms (WindowServer reorders on
+    /// ⌘ up, before any notification); show them after a poll confirms the new order. Reads only
+    /// `keyCode` and the ⌘ flag; no characters are read, logged or kept.
+    private func switchKey(_ e: NSEvent) {
+        let cmd = e.modifierFlags.contains(.command)
+        switch e.type {
+        case .keyDown:
+            if switchGesture.keyDown(keyCode: e.keyCode, command: cmd) {
+                capManager.setSwitchHidden(true, reason: "switch gesture armed")
+                Diag.shared.row("switchGesture", note: "armed")
+            }
+        case .flagsChanged:
+            if switchGesture.flagsChanged(command: cmd, now: ProcessInfo.processInfo.systemUptime) {
+                Diag.shared.row("switchGesture", note: "released")
+                promptPoll(reason: "switch released")
+            }
+        default:
+            break
+        }
+    }
+
+    @objc private func appActivated(_ n: Notification) {
+        let app = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+        Diag.shared.row("appActivated", note: app?.bundleIdentifier ?? "?")
+        if let pid = app?.processIdentifier { for o in overlays { o.scene.appActivated(pid: Int(pid)) } }
+        promptPoll(reason: "app activated")
+    }
+
+    /// Our windows' visibility as WindowServer sees it (the ⌘Tab switcher, Spaces, Mission
+    /// Control): logged for "Report a Glitch".
+    @objc private func occlusionChanged(_ n: Notification) {
+        guard let w = n.object as? NSWindow else { return }
+        let kind = (w as? CapWindow).map { "cap \($0.world.target)" } ?? (w is OverlayWindow ? "overlay" : nil)
+        guard let kind else { return }
+        Diag.shared.row("occlusion", id: w.windowNumber, rect: w.frame,
+                        note: "\(kind) visible=\(w.occlusionState.contains(.visible) ? 1 : 0) alpha=\(String(format: "%.2f", w.alphaValue)) opaque=\(w.isOpaque ? 1 : 0)")
+    }
+
+    /// Frontmost app as seen by the poll (independent of activation notifications).
+    private var lastFrontPID: pid_t = 0
+
+    /// "Report a Glitch" / ⌃⌥⌘G: writes the always-on event ring (cap show / hide / create /
+    /// destroy / mask / frame changes, vanish, pause, hitches…) to ~/Library/Logs/WinterDesk.
+    @objc private func reportGlitch() {
+        let state = "windows=\(lastWindowList.count) caps=\(capManager.caps.count) mode=\(trackingMode.rawValue) paused=\(overlays.filter { $0.isPaused }.count) power=\(PowerMonitor.shared.saving ? 1 : 0)"
+        if let p = Diag.shared.dumpRing(note: state) {
+            showToast("🧾 기록 저장: " + (p as NSString).lastPathComponent, force: true)
+        } else {
+            showToast("기록을 저장하지 못했어요", force: true)
+        }
+    }
 
     /// A window is going away (minimize / app hide / close): its overlay content and cap window
     /// disappear immediately (riders are parked for its return).
@@ -272,7 +360,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var modeItems: [NSMenuItem] = []
     private let addGiftItem = NSMenuItem(title: "Add Gift", action: #selector(addGift), keyEquivalent: "")
     private let santaItem = NSMenuItem(title: "Santa   (⌃⌥⌘D)", action: #selector(toggleSanta), keyEquivalent: "")
-    private let axItem = NSMenuItem(title: "Grant Accessibility for Dock snow", action: #selector(grantAccessibility), keyEquivalent: "")
+    private let axItem = NSMenuItem(title: "Grant Accessibility (Dock snow + no ⌘Tab flash)", action: #selector(grantAccessibility), keyEquivalent: "")
     private let windowSnowItem = NSMenuItem(title: "Snow on Windows", action: #selector(toggleWindowSnow), keyEquivalent: "")
     private let windowLightsItem = NSMenuItem(title: "Window Lights", action: #selector(toggleWindowLights), keyEquivalent: "")
     private var lightStyleItems: [NSMenuItem] = []
@@ -340,6 +428,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Safety.registerHotKey(.effects, keyCode: kVK_ANSI_E) { [weak self] in self?.toggleEffects() }
         Safety.registerHotKey(.lightEdit, keyCode: kVK_ANSI_L) { [weak self] in self?.toggleLightEdit() }
         Safety.registerHotKey(.plow, keyCode: kVK_ANSI_P) { [weak self] in self?.togglePlow() }
+        Safety.registerHotKey(.glitch, keyCode: kVK_ANSI_G) { [weak self] in self?.reportGlitch() }
         Safety.startWatchdog()
         let previousRunUnhealthy = Safety.armSentinel()
         if NSEvent.modifierFlags.contains(.shift) {
@@ -371,6 +460,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         applyPower()
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(activeSpaceChanged),
                                                           name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(occlusionChanged(_:)),
+                                               name: NSWindow.didChangeOcclusionStateNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(appActivated(_:)),
+                                                          name: NSWorkspace.didActivateApplicationNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(appHidden(_:)),
                                                           name: NSWorkspace.didHideApplicationNotification, object: nil)
         if offStateText != nil {
@@ -388,10 +481,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Running non-pinned apps widen the Dock: re-estimate its frame when apps launch / quit.
         ws.addObserver(self, selector: #selector(runningAppsChanged), name: NSWorkspace.didLaunchApplicationNotification, object: nil)
         ws.addObserver(self, selector: #selector(runningAppsChanged), name: NSWorkspace.didTerminateApplicationNotification, object: nil)
-        if !DockLocator.isTrusted && !defaults.bool(forKey: "dockAXHintShown") {
-            defaults.set(true, forKey: "dockAXHintShown")     // once; never prompts by itself
+        if !DockLocator.isTrusted && !defaults.bool(forKey: "axSwitchHintShown") {
+            defaults.set(true, forKey: "axSwitchHintShown")    // once; never prompts by itself
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
-                self?.showToast("Dock 위 눈을 정확히 맞추려면 손쉬운 사용 권한을 허용해 주세요 (메뉴 ❄️)")
+                self?.showToast("손쉬운 사용 권한을 허용하면 Dock 위 눈이 정확해지고 ⌘Tab 때 깜빡임이 사라져요 (메뉴 ❄️)")
             }
         }
         ws.addObserver(self, selector: #selector(screensWoke), name: NSWorkspace.screensDidWakeNotification, object: nil)
@@ -410,6 +503,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp, .leftMouseDragged]) { [weak self] e in
             self?.globalMouse(e)
         }
+        updateKeyMonitor()
         logDiagStart()
         let mt = Timer(timeInterval: 1.0 / 60.0, target: self, selector: #selector(pollMouse), userInfo: nil, repeats: true)
         RunLoop.main.add(mt, forMode: .common)
@@ -427,6 +521,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dockTimer?.invalidate(); dockTimer = nil
         windowTimer?.invalidate(); windowTimer = nil
         if let m = mouseMonitor { NSEvent.removeMonitor(m); mouseMonitor = nil }
+        if let k = keyMonitor { NSEvent.removeMonitor(k); keyMonitor = nil }
+        if switchGesture.hiding { switchGesture = SwitchGesture(); capManager.setSwitchHidden(false, reason: "effects stopped") }
         lastWindowList = []
         pendingGrab = nil
     }
@@ -584,7 +680,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // One starter gift unless one was saved, or the user removed it this session.
             if !hadStarter && !starterGiftUsed { main.scene.placeStarterGift() }
         }
-        for w in overlays { w.orderFrontRegardless() }
+        for w in overlays { w.orderInRevealing("start") }
         lastFullscreenCheck = 0
         checkFullscreen()
     }
@@ -610,7 +706,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !overlays.isEmpty else { return }
         let covered = FullscreenDetector.coveredScreens(overlays.map { $0.hostScreen })
         for (i, w) in overlays.enumerated() {
-            let pause = covered.contains(i)
+            // Two consecutive readings (the second ~0.3s later) before pausing or resuming: a
+            // Space / Mission Control animation frame never blinks everything off and on.
+            var d = fullscreenState[i] ?? Debounced(w.isPaused, needed: 2)
+            if d.value != w.isPaused { d = Debounced(w.isPaused, needed: 2) }
+            let flipped = d.feed(covered.contains(i))
+            if d.streak > 0 { lastFullscreenCheck = now - 0.6 }
+            fullscreenState[i] = d
+            guard flipped else { continue }
+            let pause = d.value
             guard pause != w.isPaused else { continue }
             if pause { capManager.setHidden(true, for: w) }
             w.setPaused(pause)
@@ -651,7 +755,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let own = Set(NSApp.windows.map { $0.windowNumber })
         checkFullscreen()
         if !overlays.isEmpty && overlays.allSatisfy({ $0.isPaused }) { return }     // full screen everywhere: nothing to track
-        let snap = wanted ? WindowTracker.snapshotWithPopups(ownWindows: own) : (windows: [AppWindow](), popups: [CGRect]())
+        if let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != lastFrontPID {
+            lastFrontPID = front.processIdentifier
+            Diag.shared.row("frontApp", note: "\(front.bundleIdentifier ?? "?") pid=\(front.processIdentifier)")
+        }
+        let snap = wanted ? WindowTracker.snapshotWithPopups(ownWindows: own) : (windows: [AppWindow](), popups: [CGRect](), popupRanks: [Int]())
         let all = snap.windows
         lastPopups = snap.popups
         if all != lastWindowList {
@@ -670,7 +778,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         for w in overlays {
             let sf = w.hostScreen.frame
-            w.scene.occluderPopups = lastPopups.filter { $0.intersects(sf) }.map { $0.offsetBy(dx: -sf.minX, dy: -sf.minY) }
+            let pops = zip(lastPopups, snap.popupRanks).filter { $0.0.intersects(sf) }
+            w.scene.occluderPopups = pops.map { $0.0.offsetBy(dx: -sf.minX, dy: -sf.minY) }
+            w.scene.occluderPopupRanks = pops.map { $0.1 }
             w.scene.setAppWindows(WindowTracker.local(all, in: w.hostScreen.frame))
         }
         capManager.reconcile(overlays: overlays, windows: all,
@@ -680,6 +790,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             lastPollHeartbeat = now
             Diag.shared.row("pollAlive", note: "windows=\(all.count) caps=\(capManager.caps.count) slsEvents=\(SkyLightEvents.shared.eventCount) mode=\(trackingMode.rawValue) paused=\(overlays.filter { $0.isPaused }.count)")
         }
+        if switchGesture.polled(now: now) { capManager.setSwitchHidden(false, reason: "switch confirmed by poll") }
         resolvePendingLinks()
         if !pendingRiders.isEmpty, let main = mainOverlay {
             pendingRiders = main.scene.restoreRiders(pendingRiders)
@@ -915,6 +1026,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 Diag.shared.row("grabSkipped", note: "press handled by overlay")
                 return
             }
+            // The clicked window comes to the front: masks treat it as front-most right away.
+            if let top = lastWindowList.sorted(by: { $0.order < $1.order }).first(where: { $0.frame.contains(m) }),
+               !lastPopups.contains(where: { $0.contains(m) }) {
+                for o in overlays { o.scene.windowRaised(top.id) }
+                promptPoll(reason: "click")
+            }
             // Never arm on a popup (e.g. Chrome's omnibox list) or a window not yet decorated.
             guard windowFeaturesActive, windowSnow || windowLights,
                   let id = WindowTracker.grabTarget(at: m, windows: lastWindowList, popups: lastPopups, band: AppDelegate.titleBand),
@@ -948,6 +1065,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// 2Hz: enforce scene invariants, keep overlays transparent, feed the watchdog.
     @objc private func safetyTick() {
+        let now = ProcessInfo.processInfo.systemUptime
+        if now - lastAXCheck >= 3 { lastAXCheck = now; updateKeyMonitor() }      // permission granted / revoked at runtime
+        if switchGesture.expire(now: now, commandDown: NSEvent.modifierFlags.contains(.command)) {
+            capManager.setSwitchHidden(false, reason: "switch gesture expired")
+        }
         var problem: String?
         if capManager.enforce() { NSLog("WinterDesk: a cap window was repaired (transparency / click-through)") }
         for w in overlays {
@@ -1118,6 +1240,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(axItem)
         loginItem.target = self
         menu.addItem(loginItem)
+        let glitch = NSMenuItem(title: "Report a Glitch   (⌃⌥⌘G)", action: #selector(reportGlitch), keyEquivalent: "")
+        glitch.target = self
+        menu.addItem(glitch)
         menu.addItem(.separator())
 
         let quit = NSMenuItem(title: "Quit WinterDesk", action: #selector(quit), keyEquivalent: "q")
@@ -1286,7 +1411,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func grantAccessibility() {
         if DockLocator.isTrusted {
             showAlert("Accessibility is already granted.",
-                      "WinterDesk reads the Dock's position so snow can settle on top of it.")
+                      "WinterDesk reads the Dock's position so snow can settle on top of it, and notices ⌘Tab (key codes only, nothing is recorded) so window snow never flashes during app switching.")
         } else {
             DockLocator.requestTrust()
         }

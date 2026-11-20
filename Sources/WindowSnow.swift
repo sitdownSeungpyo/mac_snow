@@ -38,10 +38,11 @@ enum WindowTracker {
     static func snapshot(ownWindows: Set<Int> = []) -> [AppWindow] { snapshotWithPopups(ownWindows: ownWindows).windows }
 
     /// Like `snapshot`, plus the frames of excluded child/popup windows (so a click inside one is
-    /// never taken as a grab of its parent).
-    static func snapshotWithPopups(ownWindows: Set<Int> = []) -> (windows: [AppWindow], popups: [CGRect]) {
+    /// never taken as a grab of its parent) and each popup's rank: how many kept windows are in
+    /// front of it (it covers only windows whose `order` ≥ its rank).
+    static func snapshotWithPopups(ownWindows: Set<Int> = []) -> (windows: [AppWindow], popups: [CGRect], popupRanks: [Int]) {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
-                as? [[String: Any]] else { return ([], []) }
+                as? [[String: Any]] else { return ([], [], []) }
         let me = Int(ProcessInfo.processInfo.processIdentifier)
         let primaryHeight = NSScreen.screens.first?.frame.maxY ?? 0
         var out: [AppWindow] = []
@@ -58,6 +59,7 @@ enum WindowTracker {
                                  owner: owner(pid: pid, name: info[kCGWindowOwnerName as String] as? String), pid: pid))
         }
         let split = splitChildWindows(out)
+        let ranks = split.popups.map { p in split.kept.filter { $0.order < p.order }.count }
         out = Array(split.kept.prefix(maxWindows))
         for i in out.indices { out[i].order = i }
         // Rank of each window number among its owner's windows (creation order; stable-ish across launches).
@@ -65,7 +67,7 @@ enum WindowTracker {
         for w in out { byOwner[w.owner, default: []].append(w.id) }
         for (k, ids) in byOwner { byOwner[k] = ids.sorted() }
         for i in out.indices { out[i].ownerIndex = byOwner[out[i].owner]?.firstIndex(of: out[i].id) ?? 0 }
-        return (out, split.popups.map { $0.frame })
+        return (out, split.popups.map { $0.frame }, ranks)
     }
 
     /// Child / popup windows (omnibox suggestions, autocomplete, dropdowns, in-window sheets): a
@@ -129,7 +131,7 @@ final class WindowCap {
     static let headroom: CGFloat = 6
     static let icicleCount = 0                  // the reference has none
 
-    let id: Int
+    private(set) var id: Int
     private(set) var frame: CGRect
     private(set) var order: Int
     let node = SKSpriteNode()
@@ -213,6 +215,9 @@ final class WindowCap {
     private func place() {
         node.position = CGPoint(x: frame.minX - WindowCap.side, y: frame.maxY - WindowCap.below)
     }
+
+    /// The app replaced its window (new window number, same place): the snow stays.
+    func rekey(to newID: Int) { id = newID }
 
     var isEmpty: Bool { heights.allSatisfy { $0 < 0.5 } }
     var averageHeight: CGFloat { heights.reduce(0, +) / CGFloat(max(heights.count, 1)) }

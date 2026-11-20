@@ -65,7 +65,7 @@ enum Safety {
 
     /// Global hot key ids (all ⌃⌥⌘ except Esc).
     enum HotKey: UInt32 {
-        case snow = 2, santa = 3, effects = 4, lightEdit = 5, escape = 6, plow = 7
+        case snow = 2, santa = 3, effects = 4, lightEdit = 5, escape = 6, plow = 7, glitch = 8
     }
 
     /// Installs the Carbon handler and ⌃⌥⌘Q. Carbon hot keys need no Accessibility /

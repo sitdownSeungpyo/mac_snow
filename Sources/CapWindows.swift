@@ -15,10 +15,13 @@ final class CapWorld {
     /// Room above the target's top edge the riders need (set by the scene, applied by the manager).
     var neededAbove: CGFloat = CapGeometry.above
     /// Room below the edge the cap window HAS (applied by the manager together with the window
-    /// frame, so the content offset and the frame always change in the same main-thread turn)
-    /// and the room the scene would like (garland or not).
-    var below: CGFloat = CapGeometry.below
-    var neededBelow: CGFloat = CapGeometry.below
+    /// frame) and the room the scene wants. Always the garland's room: the frame never changes
+    /// height when a garland comes or goes. (Live, recorded at 60fps: on every app switch the
+    /// front window's garland appeared, the cap grew 48pt downward, and for one frame
+    /// WindowServer showed the previous drawable — anchored at the bottom — 48pt too low: a
+    /// full-width white strip across the window, then the garland.)
+    var below: CGFloat = CapGeometry.garlandBelow
+    var neededBelow: CGFloat = CapGeometry.garlandBelow
     /// Where WindowServer has the cap (scene x), its offset `k` to the target's left edge, and
     /// whether the newest event was a resize (see `CapMover.anchor`); nil = no event mover
     /// (the cap then sits at `CapGeometry.worldOffset`).
@@ -34,7 +37,16 @@ final class CapWorld {
     /// Hybrid ordering: the cap floats above all normal windows and its content is cropped to
     /// the part of the strip not covered by windows in front of its target.
     let container = SKCropNode()
+    /// ONE mask tree for the cap's whole life: assigned to the crop node once and only ever
+    /// updated in place (sprites reused). Live (⌘Tab between cmux and Chrome, recorded at 60fps):
+    /// with masks swapped in as different trees, the back window's strip showed UNMASKED for
+    /// exactly one frame at each switch (most likely a newly assigned mask node is not used for
+    /// the frame it was assigned in; the one-frame flash appeared with the double-buffer build).
+    /// An uncovered cap keeps a mask too (one rect over its region): the crop node never switches
+    /// between cropped and uncropped rendering.
     private let maskRoot = SKNode()
+    private var maskPool: [SKSpriteNode] = []
+    private var offset = CGPoint.zero
     private var visible: [CGRect]?? = .none
     /// The whole cap region is covered by front windows (nothing to show).
     private(set) var fullyCovered = false
@@ -61,44 +73,64 @@ final class CapWorld {
 
     /// Content offset (see the class comment); the mask uses the same coordinates.
     func place(offset: CGPoint) {
+        self.offset = offset
         root.position = offset
         maskRoot.position = offset
     }
 
-    /// Visible part of the cap in scene coordinates: nil = no masking, [] = fully covered.
-    /// The mask nodes are rebuilt only when the rects change.
-    func setVisible(_ rects: [CGRect]?) {
-        if case .some(let cur) = visible, cur == rects { return }
+    /// Visible part of the cap in scene coordinates: nil = no occluder ("unmasked": the mask
+    /// is one rect over `region`, the cap's whole drawing region), [] = fully covered.
+    /// The mask is rebuilt only when the rects change.
+    func setVisible(_ rects: [CGRect]?, region: CGRect) {
+        // Uncovered: one rect with 400pt to spare, rebuilt only when the region leaves it (no
+        // per-frame rebuild while the window moves).
+        if case .some(let cur) = visible, cur == rects, rects != nil || maskRegion.contains(region) { return }
+        let wasCovered = fullyCovered, wasMasked = isMasked
         visible = .some(rects)
-        guard let rects else {
-            container.maskNode = nil
-            fullyCovered = false
-            onMaskChange?()
-            return
+        maskRegion = region.insetBy(dx: -400, dy: -400)
+        let region = maskRegion
+        fullyCovered = rects?.isEmpty ?? false
+        if fullyCovered != wasCovered || isMasked != wasMasked || (rects?.count ?? 0) != maskRectCount {
+            Diag.shared.row("capMask", id: target, note: rects == nil ? "unmasked" : (fullyCovered ? "fully covered" : "visible rects=\(rects!.count)"))
         }
-        fullyCovered = rects.isEmpty
-        // Reuse the mask sprites (no allocation while a window slides over this cap).
-        while maskPool.count < rects.count {
+        maskRectCount = rects?.count ?? 0
+        let want = (rects ?? [region]).filter { $0.width > 0 && $0.height > 0 }
+        while maskPool.count < want.count {
             let n = SKSpriteNode(color: .white, size: CGSize(width: 1, height: 1))
             n.anchorPoint = .zero
             maskRoot.addChild(n)
             maskPool.append(n)
         }
-        for (k, n) in maskPool.enumerated() {
-            if k < rects.count {
-                n.size = rects[k].size
-                n.position = rects[k].origin
+        for (j, n) in maskPool.enumerated() {
+            if j < want.count {
+                n.size = want[j].size
+                n.position = want[j].origin
                 n.isHidden = false
             } else if !n.isHidden {
                 n.isHidden = true
             }
         }
-        if container.maskNode !== maskRoot { container.maskNode = maskRoot }
+        maskRoot.position = offset
+        if container.maskNode !== maskRoot { container.maskNode = maskRoot }   // once
         onMaskChange?()
     }
-    private var maskPool: [SKSpriteNode] = []
+
+    /// No masking at all (masking off): the crop node gets no mask.
+    func clearMask() {
+        guard visible != .none || container.maskNode != nil else { return }
+        visible = .none
+        container.maskNode = nil
+        fullyCovered = false
+    }
+
+    /// A front window (or popup) hides part of this cap right now.
+    var isMasked: Bool { if case .some(.some) = visible { return true } else { return false } }
+    private var maskRegion = CGRect.null
+    private var maskRectCount = -1
     /// Called when the mask changed (the cap window raises its frame rate for a moment).
     var onMaskChange: (() -> Void)?
+    /// Hides the cap window at once until it has rendered its new mask (see `RevealGate`).
+    var hideUntilRendered: ((String) -> Void)?
 }
 
 /// Empty scene hosting one `CapWorld` (all logic stays in the overlay scene).
@@ -113,6 +145,9 @@ final class CapScene: SKScene {
         addChild(world.container)
     }
     required init?(coder aDecoder: NSCoder) { fatalError("init(coder:) is not supported") }
+    /// Called every update (the cap window's reveal gate counts rendered frames).
+    var onUpdate: (() -> Void)?
+    override func update(_ currentTime: TimeInterval) { onUpdate?() }
 }
 
 /// A small transparent window ordered directly above one app window, holding its snow line,
@@ -124,6 +159,19 @@ final class CapWindow: NSPanel {
     let skView: SKView
     weak var owner: OverlayWindow?
     private(set) var above: CGFloat
+    /// Consecutive manager ticks this cap was fully covered (hybrid ordering).
+    var coveredTicks = 0
+    private(set) var revealGate: RevealGate?
+    /// Orders the cap in; it becomes visible only after its first rendered frames.
+    func orderInRevealing(_ why: String) { revealGate?.orderIn(why) }
+    /// Back in after full coverage: through the reveal gate (2 rendered frames, then a fade-in).
+    func showUncovered() {
+        skView.isPaused = false
+        boost()
+        orderInRevealing("uncovered")         // fades in after it has rendered its current mask
+    }
+    /// End of a ⌘Tab hold: full frame rate for a moment, shown after two rendered frames.
+    func releaseSwitchHold(_ why: String) { boost(); revealGate?.release(why) }
 
     /// `owner` is nil only in the standalone spike.
     init(target: Int, frameCG: CGRect, above: CGFloat, level: Int32, owner: OverlayWindow?, stripZ: CGFloat, garlandZ: CGFloat) {
@@ -145,13 +193,19 @@ final class CapWindow: NSPanel {
         self.level = NSWindow.Level(rawValue: Int(level))
         collectionBehavior = [.ignoresCycle, .fullScreenAuxiliary, .managed]
         skView.allowsTransparency = true
-        skView.isAsynchronous = true
+        // A/B (defaults `capSyncRender`): render in step with Core Animation on the main thread.
+        skView.isAsynchronous = !UserDefaults.standard.bool(forKey: "capSyncRender")
         skView.ignoresSiblingOrder = false
         skView.preferredFramesPerSecond = 60
         skView.autoresizingMask = [.width, .height]
+        skView.wantsLayer = true          // the layer exists (and is made transparent) before any order-in
         contentView = skView
         ensureTransparent()
         skView.presentScene(scene)
+        alphaValue = 0                    // shown by the reveal gate once the cap has rendered
+        revealGate = RevealGate(window: self, label: "cap \(target)")
+        scene.onUpdate = { [weak self] in self?.revealGate?.sceneUpdated() }
+        world.hideUntilRendered = { [weak self] why in self?.boost(); self?.revealGate?.hideUntilRendered(why) }
         world.onMaskChange = { [weak self] in self?.boost() }
         // A size change never rescales the last drawn frame while the next one renders: it stays
         // at the bottom-left (where the content origin is), or bottom-right while growing left.
@@ -278,6 +332,19 @@ final class CapWindowManager {
     private var orderErrors = 0, orders = 0
     var frameRate = 60 { didSet { if frameRate != oldValue { applyFrameRates() } } }
 
+    /// ⌘Tab gesture in progress: every cap (strip, riders and garland are all in it) stays hidden
+    /// until the new order is confirmed; new caps are created hidden too.
+    private(set) var switchHidden = false
+    func setSwitchHidden(_ hidden: Bool, reason: String) {
+        guard hidden != switchHidden else { return }
+        switchHidden = hidden
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        for c in caps.values {
+            if hidden { c.revealGate?.hold() } else { c.releaseSwitchHold(reason) }
+        }
+        Diag.shared.row(hidden ? "capHideAll" : "capShowAll", note: String(format: "%@: %d caps in %.0fµs", reason, caps.count, Double(DispatchTime.now().uptimeNanoseconds - t0) / 1000))
+    }
+
     var available: Bool { SkyLightEvents.shared.capsAvailable && SkyLightEvents.shared.registered }
 
     /// Pure: at least 15% of the window's top edge is not covered by windows in front of it
@@ -290,6 +357,16 @@ final class CapWindowManager {
             if !windows.contains(where: { $0.order < w.order && $0.frame.contains(p) }) { visible += 1 }
         }
         return CGFloat(visible) / CGFloat(n) >= 0.15
+    }
+
+    enum CoverAction { case none, orderOut, orderIn }
+    /// Pure: what a hybrid cap does about full coverage this tick. Ordering out only saves
+    /// rendering (the mask already hides everything), so it waits 8 ticks (2s) and never happens
+    /// while any window is being moved (live: a big window dragged across a capped window's top
+    /// took its cap out and back in — snow and riders blinked). Uncovered: back in at once.
+    static func coverAction(coveredTicks: Int, fullyCovered: Bool, moving: Bool, shown: Bool, ownerPaused: Bool) -> CoverAction {
+        if fullyCovered { return coveredTicks >= 8 && !moving && shown ? .orderOut : .none }
+        return !shown && !ownerPaused ? .orderIn : .none
     }
 
     /// Frame rate tier: riders wobble (60), garland twinkle at 20Hz (30), strip only (15).
@@ -332,8 +409,9 @@ final class CapWindowManager {
 
     /// A capped window that still exists and is decorated keeps its cap even when covered.
     private func keepCovered(_ id: Int, overlays: [OverlayWindow], windows: [AppWindow]) -> Bool {
-        guard ordering == .hybrid, let c = caps[id], let o = c.owner, !o.isPaused,
-              windows.contains(where: { $0.id == id }) else { return false }
+        guard ordering == .hybrid, let c = caps[id], let o = c.owner, !o.isPaused else { return false }
+        if o.scene.ghostWindows.contains(id) { return o.scene.isDecorated(id) }    // missing from one poll: keep
+        guard windows.contains(where: { $0.id == id }) else { return false }
         return o.scene.isDecorated(id) && !o.scene.nonLiveWindows.contains(id)
     }
 
@@ -343,11 +421,12 @@ final class CapWindowManager {
         let level = ordering == .hybrid ? CapWindowManager.hybridLevel : (sls.level(of: w.id) ?? 0)
         o.scene.capMasking = ordering == .hybrid
         let above = CapGeometry.above
-        let frameCG = CapGeometry.roomyFrameCG(target: b, above: above)
+        let frameCG = CapGeometry.roomyFrameCG(target: b, above: above, below: CapGeometry.garlandBelow)
         let c = CapWindow(target: w.id, frameCG: frameCG, above: above, level: level,
                           owner: o, stripZ: o.scene.capStripZ, garlandZ: o.scene.capGarlandZ)
         c.skView.preferredFramesPerSecond = min(frameRate, 15)
-        c.orderFrontRegardless()
+        if switchHidden { c.revealGate?.hold() }
+        c.orderInRevealing("create")
         CapMover.shared.set(target: w.id, cap: c.windowNumber, above: above, x: frameCG.minX, bounds: b)
         c.moveCG(to: frameCG.origin)
         let err = ordering == .relative ? sls.order(c.windowNumber, above: w.id) : 0
@@ -390,9 +469,10 @@ final class CapWindowManager {
     /// Hides / shows the caps of one overlay (full-screen pause).
     func setHidden(_ hidden: Bool, for overlay: OverlayWindow) {
         for (id, c) in caps where c.owner === overlay {
+            Diag.shared.row(hidden ? "capHide" : "capShow", id: id, note: "overlay \(hidden ? "paused" : "resumed")")
             c.skView.isPaused = hidden
             if hidden { c.orderOut(nil) } else {
-                c.orderFrontRegardless()
+                c.orderInRevealing("overlay resumed")
                 if ordering == .relative { _ = SkyLightEvents.shared.order(c.windowNumber, above: id) }
             }
         }
@@ -419,8 +499,19 @@ final class CapWindowManager {
             c.sync(targetCG: b, above: a, below: c.world.neededBelow)
             // Hybrid: a fully covered cap is ordered out (nothing to draw), back in when uncovered.
             if ordering == .hybrid {
-                if c.world.fullyCovered && c.isVisible { c.orderOut(nil); c.skView.isPaused = true }
-                else if !c.world.fullyCovered && !c.isVisible && !(c.owner?.isPaused ?? true) { c.skView.isPaused = false; c.orderFrontRegardless() }
+                c.coveredTicks = c.world.fullyCovered ? c.coveredTicks + 1 : 0
+                let moving = !(c.owner?.scene.liveTrackedWindows.isEmpty ?? true)
+                switch CapWindowManager.coverAction(coveredTicks: c.coveredTicks, fullyCovered: c.world.fullyCovered, moving: moving,
+                                                    shown: c.isVisible, ownerPaused: c.owner?.isPaused ?? true) {
+                case .orderOut:
+                    c.orderOut(nil); c.skView.isPaused = true
+                    Diag.shared.row("capHide", id: id, note: "fully covered 2s")
+                case .orderIn:
+                    c.showUncovered()
+                    Diag.shared.row("capShow", id: id, note: "uncovered")
+                case .none:
+                    break
+                }
             }
             c.boostFrameRate = frameRate
             let fps = c.boosted ? frameRate : CapWindowManager.fps(riders: c.world.hasRiders, garland: c.world.hasGarland, cap: frameRate)

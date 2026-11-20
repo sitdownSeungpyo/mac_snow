@@ -101,6 +101,8 @@ final class WinterScene: SKScene {
     /// Uptime of the last frame update. When the view is not rendering (display asleep, view
     /// never attached to a display) actions do not run, so FX must not be spawned.
     private(set) var lastUpdateUptime: TimeInterval = 0
+    /// Called at the end of every update (the window's reveal gate counts rendered frames).
+    var onUpdate: (() -> Void)?
     var isRendering: Bool { ProcessInfo.processInfo.systemUptime - lastUpdateUptime < 0.5 }
 
     init(size: CGSize, isMainScreen: Bool) {
@@ -141,8 +143,16 @@ final class WinterScene: SKScene {
     // MARK: Configuration
 
     func setDock(_ band: DockBand?) {
+        let had = dockBand
         dockBand = band
+        let spilled0 = ground?.dockGoneSpill ?? 0
         ground?.setDock(band)
+        let spilled = (ground?.dockGoneSpill ?? 0) - spilled0
+        if had != nil && band == nil {
+            Diag.shared.row("dockGone", note: String(format: "cap snow %.0fpt² pours to the floor", spilled))
+        } else if had == nil && band != nil, let b = band {
+            Diag.shared.row("dockBack", note: String(format: "minX=%.0f maxX=%.0f top=%.0f (cap starts empty)", b.minX, b.maxX, b.top))
+        }
     }
 
     func clearObjects() {
@@ -192,6 +202,28 @@ final class WinterScene: SKScene {
         abs(a.minX - b.minX) > 0.5 || abs(a.maxY - b.maxY) > 0.5
     }
 
+    /// Moves everything kept per window from `old` to `new` (window-number churn).
+    private func adopt(from old: Int, to new: Int) {
+        func move<V>(_ d: inout [Int: V]) { if let v = d.removeValue(forKey: old) { d[new] = v } }
+        move(&trackedFrames); move(&stableSince); move(&lastBoundsChange); move(&rememberedHeight)
+        move(&liveTracks); move(&liveMode); move(&spillBank); move(&capToTrue); move(&capVelocity)
+        missing[old] = nil
+        if decorated.remove(old) != nil { decorated.insert(new) }
+        if unsettled.remove(old) != nil { unsettled.insert(new) }
+        if let cap = caps.removeValue(forKey: old) { cap.rekey(to: new); caps[new] = cap }
+        for b in balls where b.restingOn == old { b.restingOn = new }
+        for g in gifts where g.restingOn == old { g.restingOn = new }
+        Diag.shared.row("adopt", id: new, note: "window \(old) replaced by \(new) in the same place: snow kept")
+    }
+
+    /// A window absent from the window list counts as gone after this many consecutive polls
+    /// spanning this long (one missing poll never removes anything).
+    static let goneConfirmPolls = 2
+    static let goneConfirmTime: CGFloat = 0.35
+    private var missing: [Int: (since: CGFloat, polls: Int, window: AppWindow)] = [:]   // since: scene time
+    /// Windows kept although the last poll(s) did not list them (see `setAppWindows`).
+    var ghostWindows: Set<Int> { Set(missing.keys) }
+
     /// A new window gets no cap / garland / anchors until its top edge has been stable this long
     /// (transient popups and tooltips never get decorated).
     static let settleInDelay: CGFloat = 1.0
@@ -208,7 +240,10 @@ final class WinterScene: SKScene {
 
     /// Receives the current app windows (screen-local, front-to-back) at 4-10Hz. A bounds change
     /// slides the cap off; a z-order-only change just updates occlusion.
-    func setAppWindows(_ windows: [AppWindow]) {
+    func setAppWindows(_ windows: [AppWindow]) { setAppWindows(windows, poll: true) }
+
+    /// `poll` = false: a re-run with the current windows (no new list), ghosts stay as they are.
+    private func setAppWindows(_ windows: [AppWindow], poll: Bool) {
         // Defensive: never build anything from a non-finite or absurd frame.
         let list = windows.filter { w in
             let f = w.frame
@@ -227,11 +262,48 @@ final class WinterScene: SKScene {
         let previous = appWindows
         let listed = list.filter { vanished[$0.id] == nil }
         // Live mode: a frame delivered by a window event is newer than this poll; keep it.
-        let list2 = listed.map { w -> AppWindow in
+        var list2 = listed.map { w -> AppWindow in
             guard liveTracking, liveTracks[w.id] != nil, let cur = trackedFrames[w.id] else { return w }
             var l = w; l.frame = cur; return l
         }
+        // A window missing from a poll (CGWindowList skips windows during app switches, Space
+        // animations, fades) keeps its snow, riders and cap as a "ghost" until it has been missing
+        // from `goneConfirmPolls` consecutive polls spanning `goneConfirmTime`. Explicit vanishes
+        // (close / minimize / app hide) stay listed but filtered above, so they go at once.
+        let rawIDs = Set(list.map { $0.id })
+        if poll {
+            let previousIDs = Set(previous.map { $0.id })
+            for id in Array(missing.keys) where !previousIDs.contains(id) { missing[id] = nil }
+            // Window-number churn: an app replaced a window by a new one in the same place (same
+            // process, same frame within 1pt) while the old number went missing — it keeps the snow.
+            for w in list2 where trackedFrames[w.id] == nil {
+                guard let old = previous.first(where: { o in
+                    !rawIDs.contains(o.id) && o.pid == w.pid && w.pid != 0 && abs(o.frame.minX - w.frame.minX) <= 1
+                        && abs(o.frame.maxY - w.frame.maxY) <= 1 && abs(o.frame.width - w.frame.width) <= 1 }) else { continue }
+                adopt(from: old.id, to: w.id)
+            }
+            for id in Array(missing.keys) where rawIDs.contains(id) {
+                missing[id] = nil
+                Diag.shared.row("ghostBack", id: id, note: "listed again (kept everything)")
+            }
+            for w in previous where !rawIDs.contains(w.id) && trackedFrames[w.id] != nil {
+                var m = missing[w.id] ?? (elapsed, 0, w)
+                m.polls += 1
+                if m.polls >= WinterScene.goneConfirmPolls && elapsed - m.since >= WinterScene.goneConfirmTime {
+                    missing[w.id] = nil
+                    Diag.shared.row("ghostGone", id: w.id, rect: w.frame, note: String(format: "missing %d polls %.0fms", m.polls, Double(elapsed - m.since) * 1000))
+                    continue
+                }
+                if m.polls == 1 { Diag.shared.row("ghost", id: w.id, rect: w.frame, note: "missing from poll") }
+                missing[w.id] = m
+                list2.append(m.window)               // keeps its last frame and z-order
+            }
+        }
         appWindows = list2
+        if let r = raised, list2.first?.pid == r.pid && r.pid != 0 || list2.first.map({ r.ids.contains($0.id) }) == true || now - r.t >= WinterScene.raiseHold {
+            raised = nil
+            if !heldCover.isEmpty { heldCoverFrames = 0 }         // own caps unmask one frame later
+        }
         var seen = Set<Int>()
         for w in list2 {
             seen.insert(w.id)
@@ -273,6 +345,7 @@ final class WinterScene: SKScene {
                 rememberedHeight[id] = cap.averageHeight
                 cap.node.removeFromParent()
                 caps[id] = nil
+                Diag.shared.row("stripRemove", id: id, note: vanished[id] != nil ? "vanished" : "gone from window list")
             } else {
                 rememberedHeight[id] = nil
             }
@@ -313,7 +386,7 @@ final class WinterScene: SKScene {
                 let pl = Snowplow()
                 pl.zPosition = zGift - 1
                 if let view { pl.rasterize(view: view) }
-                pl.position = CGPoint(x: 70, y: (ground?.surface(at: 70) ?? 0) - 1)
+                pl.position = CGPoint(x: 70, y: (ground?.floorSurface(at: 70) ?? 0) - 1)
                 addChild(pl)
                 pl.drift.zPosition = zGift - 1.5
                 addChild(pl.drift)
@@ -328,13 +401,14 @@ final class WinterScene: SKScene {
         }
     }
 
-    /// Drives along the ground/Dock snow, turns at the screen edges and at Dock cliffs, scrapes the
-    /// snow under the blade and pushes it into a little mound in front, with a light spray.
+    /// Drives along the floor snow across the whole screen — behind the Dock too (it passes under
+    /// the Dock's glass, plowing the floor there) — turns at the screen edges, scrapes the snow
+    /// under the blade and pushes it into a little mound in front, with a light spray.
     private func updatePlow(_ dt: CGFloat) {
         guard let pl = plow, let ground else { return }
         pl.animate(time: elapsed)
         guard !pl.held else { return }
-        let surface = ground.surface(at: pl.position.x) - 1
+        let surface = ground.floorSurface(at: pl.position.x) - 1
         if pl.airborne {                                           // dropped: fall back onto the snow
             pl.vy -= gravity * dt
             pl.position.y += pl.vy * dt
@@ -343,9 +417,7 @@ final class WinterScene: SKScene {
         }
         let nx = pl.position.x + pl.dir * WinterScene.plowSpeed * dt
         let front = nx + pl.dir * (20 + pl.driftLength)
-        if front < 4 || front > size.width - 4 || nx < 22 || nx > size.width - 22
-            || abs(ground.baseHeight(at: nx + pl.dir * 20) - ground.baseHeight(at: pl.position.x)) > 4
-            || abs(ground.baseHeight(at: front) - ground.baseHeight(at: pl.position.x)) > 4 {
+        if front < 4 || front > size.width - 4 || nx < 22 || nx > size.width - 22 {
             dropDrift(pl)              // leave the pile behind as a mound, then turn around
             pl.turnAround()
             return
@@ -354,19 +426,25 @@ final class WinterScene: SKScene {
         // Scrape under the blade into the drift (until the drift is as big as it gets).
         if !pl.driftFull {
             let room = max(0, 0.88 * Snowplow.driftMaxHeight * Snowplow.driftMaxHeight - pl.driftVolume)
-            pl.driftVolume += ground.scrape(at: pl.bladeX, dir: pl.dir, keep: 10, maxArea: room)
+            pl.driftVolume += ground.scrapeFloor(at: pl.bladeX, dir: pl.dir, keep: 10, maxArea: room)
         }
-        pl.position.y = ground.surface(at: pl.position.x) - 1
+        pl.position.y = ground.floorSurface(at: pl.position.x) - 1
         pl.updateDriftTexture(scale: view?.window?.backingScaleFactor ?? 2)
         pl.drift.xScale = pl.dir
-        pl.drift.position = CGPoint(x: pl.bladeX - pl.dir * 1, y: ground.surface(at: pl.bladeX + pl.dir * 3) - 2)
+        pl.drift.position = CGPoint(x: pl.bladeX - pl.dir * 1, y: ground.floorSurface(at: pl.bladeX + pl.dir * 3) - 2)
+    }
+
+    /// The plow is behind the Dock (it can't be clicked there; the Dock takes the click).
+    func plowUnderDock(_ pl: Snowplow) -> Bool {
+        guard let b = dockBand else { return false }
+        return pl.position.x >= b.minX - 8 && pl.position.x <= b.maxX + 8 && pl.position.y < b.top
     }
 
     private func dropDrift(_ pl: Snowplow) {
         guard let ground else { return }
         let len = pl.driftLength
         let v = pl.releaseDrift()
-        ground.depositDrift(fromX: pl.bladeX, dir: pl.dir, length: len, area: v)
+        ground.depositDriftFloor(fromX: pl.bladeX, dir: pl.dir, length: len, area: v)
     }
 
     // MARK: Live window tracking (SkyLight move/resize events)
@@ -692,13 +770,88 @@ final class WinterScene: SKScene {
     var capMasking = false
     /// Child / popup windows (screen-local) that hide cap snow too (e.g. Chrome's omnibox list).
     var occluderPopups: [CGRect] = []
+    /// Per popup: how many windows are in front of it (it hides snow only of windows behind it;
+    /// a background app's tooltip never blinks the front window's snow). Missing = in front of all.
+    var occluderPopupRanks: [Int] = []
     /// Raw bounds of the latest window event per window (scene coordinates) and when it came:
     /// occlusion uses these (not the smoothed or polled frames), and a window that is being
     /// moved by events counts as frontmost (the click that drags it activates it).
     private var liveOccluder: [Int: (frame: CGRect, t: TimeInterval)] = [:]
     static let liveOccluderHold: TimeInterval = 0.4
 
-    /// Windows as occluders: event bounds where fresh, moving windows first, then poll z-order.
+    /// A window the user just clicked (it is being raised): front-most for masking until a poll
+    /// shows it in front (or `raiseHold` passes), so a cap behind it never shows over it for a poll.
+    private var raised: (ids: [Int], pid: Int, t: TimeInterval)?
+    /// "Hide early, show late": a prediction may only ADD coverage. While a raise is predicted,
+    /// the raised windows cover every other cap; their own caps keep the cover they had (the
+    /// windows in front of them at the raise) until a poll confirms the new order, and one more
+    /// frame after that (WindowServer composites the reorder before our caps re-render).
+    private var heldCover: [Int: [CGRect]] = [:]
+    private var heldCoverFrames = -1                 // > 0: frames left after the confirmation
+    private func holdCover(of ids: [Int]) {
+        for id in ids {
+            guard let me = appWindows.first(where: { $0.id == id }) else { continue }
+            heldCover[id] = appWindows.filter { $0.order < me.order && !ids.contains($0.id) }.map { $0.frame }
+        }
+        heldCoverFrames = -1
+    }
+    static let raiseHold: TimeInterval = 0.6
+    func windowRaised(_ id: Int) {
+        guard let w = appWindows.first(where: { $0.id == id }), appWindows.first?.id != id else { return }
+        holdCover(of: [id])
+        raised = ([id], w.pid, liveClock())
+        Diag.shared.row("raised", id: id, note: "click: covers other caps until a poll confirms (its own cap unchanged)")
+        hideCapsUnder([id], why: "click")
+        if !capWorlds.isEmpty { syncCapWorlds() }      // masks now, not at the next frame
+    }
+
+    /// Caps of other windows whose drawing region a just-raised window overlaps: their current
+    /// drawables (rendered before the raise; strip-only caps render at 15fps) would paint snow
+    /// over the raised window until they re-render with the new mask. They are hidden now — a
+    /// WindowServer alpha change, no render — and shown again once rendered (live ⌘Tab flash).
+    private func hideCapsUnder(_ ids: [Int], why: String) {
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        let raisedWins = appWindows.filter { ids.contains($0.id) }
+        let front = raisedWins.map { $0.frame }
+        let raisedOrder = raisedWins.map { $0.order }.min() ?? Int.max
+        var hidden: [Int] = []
+        // Only caps of windows now IN FRONT of the raised window(s) can end up under them; a cap
+        // already behind them is already masked by them (live: hiding those too made a capped
+        // window's snow and riders blink whenever another window over it was clicked / dragged).
+        for (cid, cw) in capWorlds where !ids.contains(cid) {
+            guard let w = appWindows.first(where: { $0.id == cid }), w.order < raisedOrder else { continue }
+            // Only when a raised window reaches ABOVE this window's top edge over the strip: then
+            // the strip / riders would be painted over it. A raised window whose top is at or
+            // below this one's (e.g. two maximized windows) leaves the strip visible above it —
+            // hiding it then is just a blink (live: cmux ⇄ Spotify, 9 blinks in one diag run).
+            let line = CGRect(x: w.frame.minX - CapGeometry.side, y: w.frame.maxY - 8, width: w.frame.width + 2 * CapGeometry.side, height: 8)
+            guard front.contains(where: { $0.maxY > w.frame.maxY + 3 && $0.intersection(line).width >= 8 && $0.intersects(line) }) else { continue }
+            cw.hideUntilRendered?(why)
+            hidden.append(cid)
+        }
+        lastFastHide = hidden
+        if !hidden.isEmpty {
+            Diag.shared.row("capHideFast", note: String(format: "%@: caps %@ hidden in %.0fµs", why, hidden.map(String.init).joined(separator: " "), Double(DispatchTime.now().uptimeNanoseconds - t0) / 1000))
+        }
+    }
+    /// Harness: caps hidden by the last raise.
+    private(set) var lastFastHide: [Int] = []
+
+    /// An app was activated (⌘Tab, Dock, click): WindowServer brings its windows to the front
+    /// now; the window list shows it 30–120ms later. Masks treat that app's windows as
+    /// front-most at once, so no back window's snow is ever drawn over them meanwhile.
+    func appActivated(pid: Int) {
+        let ids = appWindows.filter { $0.pid == pid && pid != 0 }.sorted { $0.order < $1.order }.map { $0.id }
+        guard !ids.isEmpty, appWindows.first?.pid != pid else { return }
+        holdCover(of: ids)
+        raised = (ids, pid, liveClock())
+        Diag.shared.row("raised", id: ids[0], note: "app activated pid=\(pid): \(ids.count) window(s) cover other caps until a poll confirms (own caps unchanged)")
+        hideCapsUnder(ids, why: "app activated")
+        if !capWorlds.isEmpty { syncCapWorlds() }      // masks now, not at the next frame
+    }
+
+    /// Windows as occluders: event bounds where fresh, moving windows first, then a just-clicked
+    /// window, then poll z-order.
     private func occluderWindows() -> [AppWindow] {
         let now = liveClock()
         var list = appWindows
@@ -721,8 +874,15 @@ final class WinterScene: SKScene {
         guard let w = appWindows.first(where: { $0.id == id }), let me = list.first(where: { $0.id == id }) else { return }
         let region = CGRect(x: w.frame.minX - CapGeometry.side, y: w.frame.maxY - CapGeometry.garlandBelow,
                             width: w.frame.width + 2 * CapGeometry.side, height: CapGeometry.garlandBelow + CapGeometry.maxAbove)
-        let front = list.filter { $0.order < me.order && $0.id != id }.map { $0.frame } + occluderPopups
-        cw.setVisible(CapGeometry.visibleRects(cap: region, occluders: front))
+        let pops = occluderPopups.enumerated().filter { k, _ in k >= occluderPopupRanks.count || occluderPopupRanks[k] <= w.order }.map { $0.1 }
+        var front = list.filter { $0.order < me.order && $0.id != id }.map { $0.frame } + pops
+        // Predictions only add coverage: a raised window covers every other cap; a raised
+        // window's own cap keeps the cover it had until the new order is confirmed (+1 frame).
+        if let r = raised, liveClock() - r.t < WinterScene.raiseHold, !r.ids.contains(id) {
+            front += appWindows.filter { r.ids.contains($0.id) }.map { $0.frame }
+        }
+        if let held = heldCover[id] { front += held }
+        cw.setVisible(CapGeometry.visibleRects(cap: region, occluders: front), region: region)
     }
 
     /// A window event moved `id` from `old` to `new`: re-mask, right now, every cap behind it whose
@@ -786,7 +946,7 @@ final class WinterScene: SKScene {
                 // (event bounds for moving windows; see `occluderWindows`).
                 updateMask(id, cw, occluders: occluders ?? { occluders = occluderWindows(); return occluders! }())
             } else {
-                cw.setVisible(nil)
+                cw.clearMask()
             }
         }
         for cap in caps.values {
@@ -819,7 +979,7 @@ final class WinterScene: SKScene {
             cw.hasRiders = riderTop[id] != nil
             cw.hasGarland = !cw.garland.children.isEmpty
             cw.animated = cw.hasRiders || cw.hasGarland
-            cw.neededBelow = cw.garland.children.isEmpty ? CapGeometry.below : CapGeometry.garlandBelow
+            cw.neededBelow = CapGeometry.garlandBelow          // constant (see `CapWorld.below`)
         }
     }
 
@@ -1154,6 +1314,7 @@ final class WinterScene: SKScene {
                     Diag.shared.row("regrow", id: w.id, rect: w.frame, note: "target=\(Int(max(2.5, h * WinterScene.keepFraction)))")
                 } else {
                     cap = WindowCap(window: w)
+                    Diag.shared.row("stripCreate", id: w.id, rect: w.frame, note: "fresh")
                 }
                 caps[w.id] = cap
                 cap.node.alpha = 0
@@ -1396,7 +1557,7 @@ final class WinterScene: SKScene {
         guard vanished[id] == nil, let w = appWindows.first(where: { $0.id == id }) else { return }
         vanished[id] = (w.frame, liveClock())
         Diag.shared.row("vanish", id: id, rect: w.frame, note: reason)
-        setAppWindows(appWindows)        // runs the removal path for it right away
+        setAppWindows(appWindows, poll: false)        // runs the removal path for it right away
     }
 
     var vanishedWindows: Set<Int> { Set(vanished.keys) }
@@ -1595,7 +1756,7 @@ final class WinterScene: SKScene {
             return "lightEdit"
         }
         if let s = santa, s.isHit(p) { return "santa" }
-        if let pl = plow, pl.isHit(p) { return "plow" }
+        if let pl = plow, pl.isHit(p), !plowUnderDock(pl) { return "plow" }
         if let g = hoverGift, g.deleteHit(p) { return "giftDelete" }
         if ballDeleteHit(p) { return "ballDelete" }
         if let g = gift(at: p) { return "gift" + (g.restingOn.map { " on=\($0)" } ?? "") }
@@ -1774,7 +1935,8 @@ final class WinterScene: SKScene {
             o.face = FaceStyle(rawValue: r.face) ?? .classic
             o.body = BodyStyle(rawValue: r.body) ?? .sticks
             o.clothes = ClothesStyle(rawValue: r.clothes) ?? .none
-            placeSnowman(onWindow: m[0], fx: CGFloat(r.fx), radii: r.radii.map { clamp(CGFloat($0), 4, Snowball.maxRadius) }, outfit: o)
+            let made = placeSnowman(onWindow: m[0], fx: CGFloat(r.fx), radii: r.radii.map { clamp(CGFloat($0), 4, Snowball.maxRadius) }, outfit: o)
+            for b in made { b.alpha = 0; b.run(.fadeIn(withDuration: RevealGate.fadeDuration)) }   // returns gently
         }
         return rest
     }
@@ -2177,7 +2339,7 @@ final class WinterScene: SKScene {
         samples = [(event.timestamp, p)]
 
         if ballDeleteTap(at: p) { return }
-        if let pl = plow, pl.isHit(p) {
+        if let pl = plow, pl.isHit(p), !plowUnderDock(pl) {
             pl.held = true
             drag = .plow(pl)
             dragOffset = pl.position - p
@@ -2763,8 +2925,15 @@ final class WinterScene: SKScene {
     override func update(_ currentTime: TimeInterval) {
         guard let ground else { return }
         if lastTime == 0 { lastTime = currentTime }
-        let dt = CGFloat(min(max(currentTime - lastTime, 0), 1.0 / 30.0))
+        let rawDt = currentTime - lastTime
+        let dt = CGFloat(min(max(rawDt, 0), 1.0 / 30.0))
         lastTime = currentTime
+        // Stutter evidence for "Report a Glitch" (not while paused).
+        // (2.5× the target interval: one dropped frame at 30fps is 67ms and is not a hitch.)
+        let target = 1.0 / Double(max(1, view?.preferredFramesPerSecond ?? 60))
+        if rawDt > 2.5 * target && rawDt < 5 && isRendering {
+            Diag.shared.row("hitch", note: String(format: "frame %.0fms target %.0fms isMain=%d", rawDt * 1000, target * 1000, isMainScreen ? 1 : 0))
+        }
         elapsed += dt
         lastUpdateUptime = ProcessInfo.processInfo.systemUptime
 
@@ -2803,6 +2972,8 @@ final class WinterScene: SKScene {
         updateBalls(dt)
         updateGifts(dt)
         if !capWorlds.isEmpty { syncCapWorlds() }
+        if heldCoverFrames > 0 { heldCoverFrames -= 1 } else if heldCoverFrames == 0 { heldCover.removeAll(); heldCoverFrames = -1 }
+        onUpdate?()
 
         if let s = santa {
             var landing: ClosedRange<CGFloat>?
