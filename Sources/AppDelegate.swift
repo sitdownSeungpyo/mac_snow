@@ -167,7 +167,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             liveMonitor.forget(wid)
         }
         guard trackingMode == .live, let i = lastWindowList.firstIndex(where: { $0.id == wid }) else { return }
-        if event == SkyLightEvents.eventClose { vanish(wid, reason: "close"); lastWindowPoll = 0; pollWindows(); return }
+        if event == SkyLightEvents.eventClose {
+            let us = CapMover.shared.takeCloseLatency(wid)
+            vanish(wid, reason: us.map { String(format: "close event (cap out in callback %.0fµs)", $0) } ?? "close event")
+            lastWindowPoll = 0; pollWindows(); return
+        }
         guard let r = SkyLightEvents.shared.bounds(of: wid) else { return }
         let primaryHeight = NSScreen.screens.first?.frame.maxY ?? 0
         let f = CGRect(x: r.minX, y: primaryHeight - r.maxY, width: r.width, height: r.height)
@@ -762,6 +766,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let snap = wanted ? WindowTracker.snapshotWithPopups(ownWindows: own) : (windows: [AppWindow](), popups: [CGRect](), popupRanks: [Int]())
         let all = snap.windows
         lastPopups = snap.popups
+        // A window missing from this poll: look it up by id (≈0.1ms). Closed / ordered out /
+        // faded out → everything on it goes NOW (apps that hide a window instead of destroying it
+        // send no close event; live: KakaoTalk chat windows lost their snow "one beat late").
+        // Still on screen and visible → only transiently unlisted: the scene's debounce keeps it.
+        let listed = Set(all.map { $0.id })
+        for w in lastWindowList where wanted && !listed.contains(w.id) {
+            let t0 = DispatchTime.now().uptimeNanoseconds
+            guard WindowTracker.reallyGone(WindowTracker.info(of: w.id)) else { continue }
+            vanish(w.id, reason: String(format: "gone from the window list (targeted check, hidden in %.0fµs)", Double(DispatchTime.now().uptimeNanoseconds - t0) / 1000))
+        }
         if all != lastWindowList {
             let old = Dictionary(lastWindowList.map { ($0.id, $0.frame) }, uniquingKeysWith: { a, _ in a })
             for w in all {
@@ -1051,6 +1065,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         default:
             Diag.shared.row("globalMouseUp")
             pendingGrab = nil
+            // A release on a window's close-button corner: look at the window list right away.
+            let m = NSEvent.mouseLocation
+            if lastWindowList.contains(where: { CGRect(x: $0.frame.minX, y: $0.frame.maxY - 30, width: 70, height: 30).contains(m) }) {
+                promptPoll(reason: "mouse-up on a close-button corner")
+            }
         }
     }
 

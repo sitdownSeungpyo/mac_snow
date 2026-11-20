@@ -90,6 +90,22 @@ enum WindowTracker {
         return (kept, popups)
     }
 
+    /// One window's CGWindowList entry, looked up by id (≈0.1ms; nil = the window no longer exists).
+    static func info(of id: Int) -> [String: Any]? {
+        guard let n = CGWindowID(exactly: id),
+              let list = CGWindowListCopyWindowInfo([.optionIncludingWindow], n) as? [[String: Any]] else { return nil }
+        return list.first { ($0[kCGWindowNumber as String] as? Int) == id }
+    }
+
+    /// Pure: a window missing from the on-screen list is really gone (closed, ordered out, faded
+    /// out) — not just transiently unlisted — when its own entry is missing, off screen or fully
+    /// transparent. Only an entry that is still on screen and visible keeps the debounce.
+    static func reallyGone(_ info: [String: Any]?) -> Bool {
+        guard let info else { return true }
+        if (info[kCGWindowIsOnscreen as String] as? Bool) != true { return true }
+        return ((info[kCGWindowAlpha as String] as? Double) ?? 1) <= 0
+    }
+
     /// The window a title-band press would grab: the front-most kept window containing `m`, unless
     /// `m` is inside an excluded popup (a click in Chrome's omnibox list is never a grab), and only
     /// within `band` points of that window's top edge.

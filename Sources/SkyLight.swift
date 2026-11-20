@@ -86,6 +86,8 @@ final class SkyLightEvents {
         // Cap windows move right here, on the callback's thread, before anything else: no hop,
         // no redraw (bounded work: one bounds read + one move under a lock-protected lookup).
         if event == SkyLightEvents.eventMove || event == SkyLightEvents.eventResize { CapMover.shared.follow(raw) }
+        // A closing window's cap goes out right here (like the minimize case), before the hop.
+        if event == SkyLightEvents.eventClose { CapMover.shared.closeNow(raw) }
         let wid = Int(raw)
         if Thread.isMainThread {
             SkyLightEvents.shared.deliver(event, wid)
@@ -340,6 +342,29 @@ final class CapMover {
         }
         if err != 0 { moveErrors += 1 }
         lock.unlock()
+    }
+
+    /// The target closed: its cap is ordered out now (callback thread). Returns µs taken, nil if
+    /// no cap. The main thread then removes it (`CapWindowManager.remove`).
+    @discardableResult
+    func closeNow(_ target: UInt32) -> Double? {
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        lock.lock()
+        let e = entries[target]
+        lock.unlock()
+        guard let e, !e.vanished else { return nil }
+        let sls = SkyLightEvents.shared
+        _ = sls.orderWindow?(sls.connection, e.cap, 0, 0)
+        let us = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1000
+        lock.lock(); entries[target]?.vanished = true; closedInCallback[target] = us; lock.unlock()
+        return us
+    }
+    private var closedInCallback: [UInt32: Double] = [:]
+    /// µs the callback took to order out the cap of `target` on its close event (taken once).
+    func takeCloseLatency(_ target: Int) -> Double? {
+        guard let t = UInt32(exactly: target) else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        return closedInCallback.removeValue(forKey: t)
     }
 
     /// Summary since the last call (diag); always returns a line (an absent row then means the
