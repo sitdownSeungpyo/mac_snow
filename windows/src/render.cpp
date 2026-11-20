@@ -576,7 +576,10 @@ Def ReinsDef(float s)
     });
 }
 
-const D2D1_COLOR_F kBulbColors[6] = {{1, 0.22f, 0.22f, 1}, {0.25f, 0.95f, 0.4f, 1}, {0.3f, 0.55f, 1, 1}, {1, 0.76f, 0.2f, 1}, {1, 0.86f, 0.6f, 1}, {1, 0.86f, 0.6f, 1}};
+// red, green, blue, gold, warm, warm (Warm White), white, cyan, pink
+const D2D1_COLOR_F kBulbColors[kBulbColorCount] = {{1, 0.22f, 0.22f, 1}, {0.25f, 0.95f, 0.4f, 1}, {0.3f, 0.55f, 1, 1}, {1, 0.76f, 0.2f, 1},
+                                                   {1, 0.86f, 0.6f, 1}, {1, 0.86f, 0.6f, 1}, {0.94f, 0.97f, 1, 1}, {0.35f, 0.9f, 1, 1},
+                                                   {1, 0.45f, 0.75f, 1}};
 
 }  // namespace
 
@@ -755,17 +758,24 @@ bool Renderer::CreateArt()
     ok &= render(NoseGlowDef(S), noseGlow);
     ok &= render(ReinsDef(S), reins);
     if (!ok) return false;
+    return CreateAtlas(flakePct);
+}
 
+bool Renderer::CreateAtlas(int pct)
+{
+    Painter p(*this);
+    D2D1_BITMAP_PROPERTIES1 bp = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
+                                                         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96, 96);
     // ---- atlas: flakes, bulbs, sparkles (drawn with sprite batches) ----
     std::vector<Def> defs;
     std::vector<AtlasSprite*> slots;
-    const float sz[4] = {2.2f, 3.f, 4.2f, 6.f};
     const float al[3] = {0.5f, 0.75f, 1.f};
+    int sizes[4];
     for (int i = 0; i < 4; i++) {
-        flakeSizes[i] = std::max(2, (int)std::lround(sz[i] * S));
-        for (int j = 0; j < 3; j++) { defs.push_back(FlakeDef(flakeSizes[i], al[j])); slots.push_back(&flakes[i * 3 + j]); }
+        sizes[i] = FlakePx(i, pct, S);
+        for (int j = 0; j < 3; j++) { defs.push_back(FlakeDef(sizes[i], al[j])); slots.push_back(&flakes[i * 3 + j]); }
     }
-    for (int c = 0; c < 6; c++)
+    for (int c = 0; c < kBulbColorCount; c++)
         for (int sh = 0; sh < 2; sh++)
             for (int l = 0; l < 3; l++) { defs.push_back(BulbDef(kBulbColors[c], sh == 1, l, S)); slots.push_back(&bulbs[c][sh][l]); }
     for (int l = 0; l < 3; l++) { defs.push_back(LanternDef(l, S)); slots.push_back(&lanterns[l]); }
@@ -790,8 +800,9 @@ bool Renderer::CreateArt()
         atlasW = std::max(atlasW, x);
     }
     int atlasH = y + rowH + gutter;
-    if (FAILED(dc->CreateBitmap(D2D1::SizeU((UINT32)atlasW, (UINT32)atlasH), nullptr, 0, &bp, &atlas))) return false;
-    dc->SetTarget(atlas.Get());
+    ComPtr<ID2D1Bitmap1> fresh;            // the old atlas stays in use until the new one is complete
+    if (FAILED(dc->CreateBitmap(D2D1::SizeU((UINT32)atlasW, (UINT32)atlasH), nullptr, 0, &bp, &fresh))) return false;
+    dc->SetTarget(fresh.Get());
     dc->BeginDraw();
     dc->Clear(Rgb(0, 0, 0, 0));
     for (size_t i = 0; i < defs.size(); i++) {
@@ -803,6 +814,13 @@ bool Renderer::CreateArt()
         d.draw(p);
         dc->SetTransform(Matrix3x2F::Identity());
         dc->PopAxisAlignedClip();
+    }
+    if (FAILED(dc->EndDraw())) return false;
+    atlas = fresh;                         // commit only on success (sprites, sizes, pct together)
+    flakePct = pct;
+    std::copy(sizes, sizes + 4, flakeSizes);
+    for (size_t i = 0; i < defs.size(); i++) {
+        const Def& d = defs[i];
         AtlasSprite& a = *slots[i];
         a.src = D2D1::RectU((UINT32)pos[i].x, (UINT32)pos[i].y, (UINT32)(pos[i].x + d.w), (UINT32)(pos[i].y + d.h));
         a.ox = d.ox;
@@ -810,7 +828,7 @@ bool Renderer::CreateArt()
         a.w = (float)d.w;
         a.h = (float)d.h;
     }
-    return SUCCEEDED(dc->EndDraw());
+    return true;
 }
 
 bool Renderer::BeginFrame()

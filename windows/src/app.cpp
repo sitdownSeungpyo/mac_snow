@@ -17,10 +17,10 @@ enum : UINT {
     WM_TRAY = WM_APP + 1,
     ID_EFFECTS = 100, ID_EDITLIGHTS, ID_SNOW, ID_INT_LIGHT, ID_INT_NORMAL, ID_INT_HEAVY, ID_MODE_DESKTOP, ID_MODE_ONTOP,
     ID_SANTA, ID_PLOW, ID_WINSNOW, ID_LIGHTS, ID_LIVE, ID_DRAG_SLIDES, ID_DRAG_STAYS, ID_LINKS_AUTO, ID_LINKS_MANUAL,
-    ID_GARLANDS, ID_STYLE_MULTI, ID_STYLE_WARM, ID_ADDGIFT, ID_CLEARBALLS, ID_CLEARALL, ID_RESET, ID_LOGIN, ID_GLITCH, ID_QUIT,
-    ID_BALL_DELETE,
-    HK_QUIT = 1, HK_EFFECTS, HK_SNOW, HK_SANTA, HK_PLOW, HK_LIGHTEDIT, HK_GLITCH,
-    TIMER_HEARTBEAT = 1, TIMER_REBUILD, TIMER_MENU, TIMER_STARTHINT,
+    ID_GARLANDS, ID_STYLE_MULTI, ID_STYLE_WARM, ID_STYLE_CLASSIC, ID_STYLE_ICY, ID_STYLE_CANDY, ID_ADDGIFT, ID_CLEARBALLS, ID_CLEARALL, ID_RESET, ID_LOGIN, ID_GLITCH, ID_QUIT,
+    ID_BALL_DELETE, ID_SETTINGS,
+    HK_QUIT = 1, HK_EFFECTS, HK_SNOW, HK_SANTA, HK_PLOW, HK_LIGHTEDIT, HK_GLITCH, HK_SETTINGS,
+    TIMER_HEARTBEAT = 1, TIMER_REBUILD, TIMER_MENU, TIMER_STARTHINT, TIMER_TRAYCLICK,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -169,6 +169,7 @@ private:
     void SlowTick(double now);
     void RenderFrame(double now, Activity act);
     void CursorPoll();
+    bool SettingsOnTopAt(HWND sw, POINT pt) const;
     void SetClickThrough(bool through);
     bool BuildOverlay();
     bool CreateOverlayWindowAndRenderer();
@@ -180,12 +181,16 @@ private:
     bool FullscreenOnDisplay();
     void ApplyMode();
     void KeepAboveDesktop(bool log);
-    void ShowMenu();
+    void ShowMenu(const POINT* at = nullptr);
+    void CancelTrayClick() { if (ctl_) KillTimer(ctl_, TIMER_TRAYCLICK); }
     void Command(UINT id);
+    void OpenSettings(int tab);
+    void UiCommand(int sc);
     void Changed();
     void Toast(const std::wstring& t, bool force = false);
     void ToggleEffects();
     void ToggleLightEdit();
+    bool EnterLightEdit();
     void ExitLightEdit(bool silent);
     void LinksChanged();
     void ReportGlitch();
@@ -214,12 +219,15 @@ private:
     bool lightEdit_ = false;
     bool testMode_ = false, needShow_ = false, lastPrimaryDown_ = false;
     double primaryUpSince_ = -1, retryDelay_ = 5;
-    UINT msgState_ = 0, msgSanta_ = 0, msgBall_ = 0, msgEdit_ = 0, msgCommand_ = 0, msgHit_ = 0, msgSnowman_ = 0, msgCustomize_ = 0;
+    UINT msgState_ = 0, msgSanta_ = 0, msgBall_ = 0, msgEdit_ = 0, msgCommand_ = 0, msgHit_ = 0, msgSnowman_ = 0, msgCustomize_ = 0, msgSettings_ = 0;
     std::vector<SavedGift> savedGifts_;
     bool haveSaved_ = false, defaultGiftRemovedThisSession_ = false;
     std::vector<SavedRider> pendingRiders_;
     std::vector<SavedLink> pendingLinks_;
-    HICON iconOn_ = nullptr, iconOff_ = nullptr;
+    HICON iconOn_ = nullptr, iconOff_ = nullptr, iconBig_ = nullptr;
+    bool traySkipSelect_ = false;      // the NIN_SELECT of a double-click's second release is ignored
+    POINT trayPt_{};                   // icon anchor of the pending single click (menu goes there)
+    HWND trayFg_ = nullptr;            // foreground at that click: a change cancels the pending menu
     UINT wmTaskbarCreated_ = 0;
     NOTIFYICONDATAW nid_{};
     HWINEVENTHOOK hooks_[5] = {};
@@ -274,6 +282,7 @@ int App::Run(HINSTANCE inst, bool safe, const std::wstring& safeWhy, double test
     msgHit_ = RegisterWindowMessageW(L"WinterDesk.Test.HitTest");
     msgSnowman_ = RegisterWindowMessageW(L"WinterDesk.Test.Snowman");
     msgCustomize_ = RegisterWindowMessageW(L"WinterDesk.Test.Customize");
+    msgSettings_ = RegisterWindowMessageW(L"WinterDesk.Test.Settings");
     haveSaved_ = LoadGifts(savedGifts_);
     pendingRiders_ = LoadRiders();
     pendingLinks_ = LoadLinks();
@@ -307,7 +316,7 @@ int App::Run(HINSTANCE inst, bool safe, const std::wstring& safeWhy, double test
     SetTimer(ctl_, TIMER_HEARTBEAT, 1000, nullptr);
 
     const struct { int id; UINT vk; const wchar_t* name; } keys[] = {{HK_QUIT, 'Q', L"Q"}, {HK_EFFECTS, 'E', L"E"}, {HK_SNOW, 'S', L"S"},
-        {HK_SANTA, 'D', L"D"}, {HK_PLOW, 'P', L"P"}, {HK_LIGHTEDIT, 'L', L"L"}, {HK_GLITCH, 'G', L"G"}};
+        {HK_SANTA, 'D', L"D"}, {HK_PLOW, 'P', L"P"}, {HK_LIGHTEDIT, 'L', L"L"}, {HK_GLITCH, 'G', L"G"}, {HK_SETTINGS, 'O', L"O"}};
     std::wstring reg;
     for (const auto& k : keys) {
         if (RegisterHotKey(ctl_, k.id, MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, k.vk)) reg += k.name;
@@ -318,6 +327,7 @@ int App::Run(HINSTANCE inst, bool safe, const std::wstring& safeWhy, double test
     int iconSize = GetSystemMetrics(SM_CXSMICON);
     iconOn_ = MakeFlakeIcon(iconSize, false);
     iconOff_ = MakeFlakeIcon(iconSize, true);
+    iconBig_ = MakeFlakeIcon(GetSystemMetrics(SM_CXICON), false);
     AddTray();
 
     const DWORD flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
@@ -368,16 +378,18 @@ int App::Run(HINSTANCE inst, bool safe, const std::wstring& safeWhy, double test
 
     Logf(L"shutting down");
     ExitLightEdit(true);
+    CloseSettingsUi();
     TearDown();
     PanelsShutdown();
     for (HWINEVENTHOOK h : hooks_) if (h) UnhookWinEvent(h);
     for (auto& kv : liveHooks_) UnhookWinEvent(kv.second);
-    for (int id = HK_QUIT; id <= HK_GLITCH; id++) UnregisterHotKey(ctl_, id);
+    for (int id = HK_QUIT; id <= HK_SETTINGS; id++) UnregisterHotKey(ctl_, id);
     Shell_NotifyIconW(NIM_DELETE, &nid_);
     WTSUnRegisterSessionNotification(ctl_);
     DestroyWindow(ctl_);
     if (iconOn_) DestroyIcon(iconOn_);
     if (iconOff_) DestroyIcon(iconOff_);
+    if (iconBig_) DestroyIcon(iconBig_);
     DiagFlush();
     dog_.Stop();
     ClearSentinel();
@@ -565,6 +577,7 @@ bool App::CreateOverlayWindowAndRenderer()
     SetLayeredWindowAttributes(overlay_, 0, 255, LWA_ALPHA);
     clickThrough_ = true;
     rend_.reset(new Renderer());
+    rend_->flakePct = settings_.flakeSize;   // the atlas is built once, at the user's flake size
     dog_.Beat();
     bool inited = rend_->Init(overlay_, w, h, std::max(0.5f, disp_.scale));   // includes the art rendering
     dog_.Beat();
@@ -827,12 +840,41 @@ void App::CursorPoll()
     RECT cr;
     bool overPanel = cust && GetWindowRect(cust, &cr) && PtInRect(&cr, pt);
     if (overPanel) inside = false;
+    // the settings window is never covered by an overlay capture (On Top mode draws above it), but
+    // only where it really is the top visible window under the cursor
+    HWND sw = SettingsUiHwnd();
+    RECT sr;
+    if (inside && sw && IsWindowVisible(sw) && !IsIconic(sw) && GetWindowRect(sw, &sr) && PtInRect(&sr, pt) && SettingsOnTopAt(sw, pt))
+        inside = false;
     if (primaryDown && !lastPrimaryDown_ && cust && !overPanel) { Logf(L"TEST customize panel closed by a click outside"); HideCustomize(); }
     lastPrimaryDown_ = primaryDown;
     // Light Edit: Esc is read, not grabbed (other apps still receive it)
     if (lightEdit_ && (GetAsyncKeyState(VK_ESCAPE) & 0x8000)) { ExitLightEdit(false); return; }
     bool interactive = scene_->UpdateCursor((float)(pt.x - b.left), (float)(pt.y - b.top), inside, settings_.EffMode() == ModeDesktop);
     SetClickThrough(!interactive);
+}
+
+/// True when `sw` (cursor already inside its rect) is not cloaked and no other visible, uncloaked,
+/// click-receiving top-level window of another process lies above it at `pt`. Walks only the
+/// windows above it in z-order, and runs only while the cursor is over the settings window.
+bool App::SettingsOnTopAt(HWND sw, POINT pt) const
+{
+    if (IsCloaked(sw)) return false;                         // on another virtual desktop
+    DWORD self = GetCurrentProcessId();
+    int guard = 0;
+    for (HWND w = GetWindow(sw, GW_HWNDPREV); w && guard < 512; w = GetWindow(w, GW_HWNDPREV), guard++) {
+        if (!IsWindowVisible(w) || IsIconic(w)) continue;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(w, &pid);
+        if (pid == self) continue;                           // overlay, toast, hint, coach, customize
+        LONG_PTR ex = GetWindowLongPtrW(w, GWL_EXSTYLE);
+        if ((ex & WS_EX_TRANSPARENT) && (ex & WS_EX_LAYERED)) continue;   // click-through overlays of other apps
+        RECT r;
+        if (!GetWindowRect(w, &r) || !PtInRect(&r, pt)) continue;
+        if (IsCloaked(w)) continue;
+        return false;
+    }
+    return true;
 }
 
 void App::SetClickThrough(bool through)
@@ -968,13 +1010,17 @@ std::wstring App::OffStateText() const
     return parts.empty() ? parts : L"꺼져 있음: " + parts;
 }
 
-void App::ShowMenu()
+void App::ShowMenu(const POINT* at)
 {
+    CancelTrayClick();
     HMENU m = CreatePopupMenu(), inten = CreatePopupMenu(), mode = CreatePopupMenu(), drag = CreatePopupMenu(), links = CreatePopupMenu(),
           style = CreatePopupMenu();
     auto chk = [](bool b) { return (UINT)(MF_STRING | (b ? MF_CHECKED : MF_UNCHECKED)); };
     std::wstring off = OffStateText();
     if (!haveDisp_) AppendMenuW(m, MF_STRING | MF_GRAYED, 0, L"\uB0B4\uC7A5 \uB514\uC2A4\uD50C\uB808\uC774 \uC5C6\uC74C \u2013 \uC77C\uC2DC \uC815\uC9C0");
+    AppendMenuW(m, MF_STRING, ID_SETTINGS, L"⚙ 설정…");
+    SetMenuDefaultItem(m, ID_SETTINGS, FALSE);
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     if (!off.empty()) AppendMenuW(m, MF_STRING | MF_GRAYED, 0, (L"⚠️ " + off).c_str());
     AppendMenuW(m, chk(settings_.effectsOn), ID_EFFECTS, L"Effects On\tCtrl+Alt+Shift+E");
     AppendMenuW(m, chk(lightEdit_) | (settings_.effectsOn ? 0 : MF_GRAYED), ID_EDITLIGHTS, L"전구 연결하기…\tCtrl+Alt+Shift+L");
@@ -1007,6 +1053,9 @@ void App::ShowMenu()
     AppendMenuW(m, chk(settings_.windowGarlands), ID_GARLANDS, L"Window Garlands");
     AppendMenuW(style, chk(settings_.lightStyle == 0), ID_STYLE_MULTI, L"Multicolor");
     AppendMenuW(style, chk(settings_.lightStyle == 1), ID_STYLE_WARM, L"Warm White");
+    AppendMenuW(style, chk(settings_.lightStyle == 2), ID_STYLE_CLASSIC, L"Classic");
+    AppendMenuW(style, chk(settings_.lightStyle == 3), ID_STYLE_ICY, L"Icy");
+    AppendMenuW(style, chk(settings_.lightStyle == 4), ID_STYLE_CANDY, L"Candy");
     AppendMenuW(m, MF_POPUP, (UINT_PTR)style, L"Light Style");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING | (scene_ && scene_->CanAddGift() ? 0 : MF_GRAYED), ID_ADDGIFT, L"Add Gift");
@@ -1021,7 +1070,8 @@ void App::ShowMenu()
     AppendMenuW(m, MF_STRING | MF_GRAYED, 0, L"Emergency quit from anywhere: Ctrl+Alt+Shift+Q");
 
     POINT pt;
-    GetCursorPos(&pt);
+    if (at) pt = *at;
+    else GetCursorPos(&pt);
     UINT cmd = RunPopupMenu(m, pt, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN);
     DestroyMenu(m);
     if (cmd) Command(cmd);
@@ -1032,7 +1082,9 @@ void App::ShowMenu()
 UINT App::RunPopupMenu(HMENU m, POINT pt, UINT flags)
 {
     HWND prev = GetForegroundWindow();
-    SetForegroundWindow(ctl_);
+    // a tray click gives us the right to take the foreground (the shell allows it for the icon's
+    // owner); without it the menu still shows but may not close on an outside click - logged
+    if (!SetForegroundWindow(ctl_)) Logf(L"popup menu: SetForegroundWindow refused (menu may not close on an outside click)");
     inMenu_ = true;
     SetTimer(ctl_, TIMER_MENU, 33, nullptr);   // keep animating / beating while the menu loop runs
     UINT cmd = (UINT)TrackPopupMenuEx(m, TPM_RETURNCMD | TPM_NONOTIFY | flags, pt.x, pt.y, ctl_, nullptr);
@@ -1055,6 +1107,7 @@ void App::Changed()
     settings_.Save();
     if (scene_) scene_->SettingsChanged();
     pollRequested_ = true;
+    SettingsUiRefresh();
 }
 
 void App::ToggleEffects()
@@ -1064,14 +1117,22 @@ void App::ToggleEffects()
     Logf(L"effects %s", settings_.effectsOn ? L"on" : L"off");
     UpdateRunning();
     Toast(settings_.effectsOn ? L"✨ 효과 켜짐" : L"✨ 효과 꺼짐", true);
+    SettingsUiRefresh();
 }
 
 void App::ToggleLightEdit()
 {
     if (lightEdit_) { ExitLightEdit(false); return; }
-    if (locked_ || suspended_) return;
-    if (!settings_.effectsOn) { Toast(L"효과가 꺼져 있어요 (Ctrl+Alt+Shift+E)", true); return; }
-    if (settings_.safeMode) { Toast(L"안전 모드에서는 전구 연결을 할 수 없어요"); return; }
+    EnterLightEdit();
+}
+
+/// Starts Light Edit (turning on what it needs); true when it is on afterwards.
+bool App::EnterLightEdit()
+{
+    if (lightEdit_) return true;
+    if (locked_ || suspended_) return false;
+    if (!settings_.effectsOn) { Toast(L"효과가 꺼져 있어요 (Ctrl+Alt+Shift+E)", true); return false; }
+    if (settings_.safeMode) { Toast(L"안전 모드에서는 전구 연결을 할 수 없어요"); return false; }
     if (!settings_.WindowFeatures() || !settings_.windowLights) {
         // turn on what linking needs instead of silently doing nothing
         bool rebuild = settings_.EffMode() != ModeOnTop;
@@ -1081,7 +1142,7 @@ void App::ToggleLightEdit()
         if (rebuild) ApplyMode(); else Changed();
         Toast(L"전구 연결을 위해 On Top 모드와 Window Lights를 켰어요");
     }
-    if (!scene_ || !visible_) return;
+    if (!scene_ || !visible_) return false;
     lightEdit_ = true;
     scene_->SetLightEdit(true);
     Logf(L"TEST light edit on (Esc is polled, not grabbed)");
@@ -1090,6 +1151,7 @@ void App::ToggleLightEdit()
         if (lightEdit_)
             ShowHint(Host(), L"금색 점 → 다른 창의 금색 점으로 드래그 · 전구 클릭 = 삭제 · Esc = 끝내기");
     });
+    return true;
 }
 
 void App::ExitLightEdit(bool silent)
@@ -1129,6 +1191,7 @@ void App::ReportGlitch()
 
 void App::Command(UINT id)
 {
+    CancelTrayClick();                       // a pending single-click menu is stale once anything ran
     switch (id) {
     case ID_EFFECTS: ToggleEffects(); break;
     case ID_EDITLIGHTS: ToggleLightEdit(); break;
@@ -1165,7 +1228,10 @@ void App::Command(UINT id)
         Changed();
         break;
     case ID_GARLANDS: settings_.windowGarlands = !settings_.windowGarlands; Changed(); break;
-    case ID_STYLE_MULTI: case ID_STYLE_WARM: settings_.lightStyle = id == ID_STYLE_WARM ? 1 : 0; Changed(); break;
+    case ID_STYLE_MULTI: case ID_STYLE_WARM: case ID_STYLE_CLASSIC: case ID_STYLE_ICY: case ID_STYLE_CANDY:
+        settings_.lightStyle = (int)(id - ID_STYLE_MULTI);
+        Changed();
+        break;
     case ID_ADDGIFT: if (scene_) scene_->AddGift(); break;
     case ID_CLEARBALLS:
         if (scene_) scene_->ClearBalls();
@@ -1186,14 +1252,55 @@ void App::Command(UINT id)
     case ID_LOGIN: SetLaunchAtLogin(!GetLaunchAtLogin()); break;
     case ID_GLITCH: ReportGlitch(); break;
     case ID_QUIT: Logf(L"quit from menu"); Quit(); break;
+    case ID_SETTINGS: OpenSettings(-1); break;
     default: break;
     }
+    SettingsUiRefresh();
+}
+
+void App::OpenSettings(int tab)
+{
+    CancelTrayClick();
+    SettingsUiHost h;
+    h.settings = &settings_;
+    h.work = disp_.work;
+    if (!haveDisp_ || IsRectEmpty(&h.work)) SystemParametersInfoW(SPI_GETWORKAREA, 0, &h.work, 0);
+    h.iconBig = iconBig_;
+    h.iconSmall = iconOn_;
+    h.test = testMode_;
+    h.command = [this](int sc) { UiCommand(sc); };
+    h.apply = [this](bool save) {
+        if (save) settings_.Save();
+        if (scene_) scene_->SettingsChanged();
+        pollRequested_ = true;
+    };
+    h.canAddGift = [this] { return scene_ && scene_->CanAddGift(); };
+    h.canEditLights = [this] { return scene_ && visible_ && !locked_ && !suspended_ && settings_.effectsOn && !settings_.safeMode; };
+    h.enterLightEdit = [this] { CancelTrayClick(); bool on = EnterLightEdit(); SettingsUiRefresh(); return on; };
+    h.paused = [this] { return locked_ || suspended_; };
+    h.pump = [this] { if (!inMenu_) Tick(false); };
+    ShowSettingsUi(h, tab);
+}
+
+/// Settings window actions: the same paths as the tray menu (toasts, mode rebuilds, safe mode).
+void App::UiCommand(int sc)
+{
+    static const UINT map[] = {ID_EFFECTS, ID_SNOW, ID_SANTA, ID_PLOW, ID_WINSNOW, ID_LIGHTS, ID_LIVE, ID_GARLANDS, ID_LOGIN, ID_EDITLIGHTS,
+                               ID_ADDGIFT, ID_CLEARBALLS, ID_CLEARALL, ID_RESET, ID_MODE_DESKTOP, ID_MODE_ONTOP, ID_LINKS_AUTO, ID_LINKS_MANUAL,
+                               ID_DRAG_SLIDES, ID_DRAG_STAYS};
+    if (sc == SC_ResetEffects) {
+        settings_.ResetEffects();
+        Changed();
+        Toast(L"↺ 효과 설정을 기본값으로 되돌렸어요");
+        return;
+    }
+    if (sc >= 0 && sc < (int)_countof(map)) Command(map[sc]);
 }
 
 LRESULT App::CtlProc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
     if (m == wmTaskbarCreated_ && m != 0) { AddTray(); return 0; }
-    if (m != 0 && (m == msgState_ || m == msgSanta_ || m == msgBall_ || m == msgEdit_ || m == msgCommand_ || m == msgHit_ || m == msgSnowman_ || m == msgCustomize_)) {
+    if (m != 0 && (m == msgState_ || m == msgSanta_ || m == msgBall_ || m == msgEdit_ || m == msgCommand_ || m == msgHit_ || m == msgSnowman_ || m == msgCustomize_ || m == msgSettings_)) {
         if (!testMode_) { Logf(L"automation message ignored (start with --test to enable)"); return 0; }
         if (m == msgState_) { if (scene_) Logf(L"STATE %s", scene_->StateLine().c_str()); }
         else if (m == msgSanta_ && scene_) {
@@ -1205,6 +1312,7 @@ LRESULT App::CtlProc(HWND h, UINT m, WPARAM w, LPARAM l)
         else if (m == msgCustomize_) { if (scene_) Logf(L"TEST customize open %d", scene_->TestOpenCustomizer((float)((int)w - disp_.bounds.left)) ? 1 : 0); }
         else if (m == msgBall_) { if (scene_) { Ball* b = scene_->SpawnTestBall((float)w, (float)l); Logf(L"TEST spawned ball %d", b ? 1 : 0); } }
         else if (m == msgEdit_) ToggleLightEdit();
+        else if (m == msgSettings_) { if (l == 1) CloseSettingsUi(); else OpenSettings((int)w); }
         else if (m == msgCommand_) Command((UINT)w);
         else if (m == msgHit_ && scene_) {
             float x = (float)((int)w - disp_.bounds.left), y = (float)((int)l - disp_.bounds.top);
@@ -1215,18 +1323,40 @@ LRESULT App::CtlProc(HWND h, UINT m, WPARAM w, LPARAM l)
     }
     switch (m) {
     case WM_TRAY:
+        // NOTIFYICON_VERSION_4: LOWORD(l) = event, wParam = icon anchor (screen x, y). A double-click
+        // arrives as LBUTTONDOWN, NIN_SELECT, LBUTTONDBLCLK, NIN_SELECT (the second release).
         switch (LOWORD(l)) {
-        case WM_CONTEXTMENU:
-        case NIN_SELECT:
-        case NIN_KEYSELECT:
-            if (!inMenu_) ShowMenu();
+        case WM_LBUTTONDOWN:
+            traySkipSelect_ = false;            // a fresh first press: nothing left to skip
             break;
+        case NIN_SELECT:
+            if (traySkipSelect_) { traySkipSelect_ = false; break; }   // the double-click's second release
+            // a single click opens the menu (at the icon) once the double-click time passed without a second click
+            if (!inMenu_) {
+                trayPt_ = {GET_X_LPARAM(w), GET_Y_LPARAM(w)};
+                trayFg_ = GetForegroundWindow();
+                SetTimer(h, TIMER_TRAYCLICK, GetDoubleClickTime(), nullptr);
+            }
+            break;
+        case WM_LBUTTONDBLCLK:
+            CancelTrayClick();
+            traySkipSelect_ = true;
+            if (!inMenu_) OpenSettings(-1);
+            break;
+        case WM_CONTEXTMENU:
+        case NIN_KEYSELECT: {
+            CancelTrayClick();
+            POINT at = {GET_X_LPARAM(w), GET_Y_LPARAM(w)};
+            if (!inMenu_) ShowMenu(&at);
+            break;
+        }
         default:
             break;
         }
         return 0;
     case WM_HOTKEY:
         Logf(L"TEST hotkey %d", (int)w);
+        CancelTrayClick();
         switch ((int)w) {
         case HK_QUIT: Logf(L"emergency quit hotkey"); Quit(); break;
         case HK_EFFECTS: ToggleEffects(); break;
@@ -1235,6 +1365,7 @@ LRESULT App::CtlProc(HWND h, UINT m, WPARAM w, LPARAM l)
         case HK_PLOW: Command(ID_PLOW); break;
         case HK_LIGHTEDIT: ToggleLightEdit(); break;
         case HK_GLITCH: ReportGlitch(); break;
+        case HK_SETTINGS: OpenSettings(-1); break;
         default: break;
         }
         return 0;
@@ -1242,6 +1373,12 @@ LRESULT App::CtlProc(HWND h, UINT m, WPARAM w, LPARAM l)
         dog_.Beat();
         if (w == TIMER_REBUILD) { KillTimer(h, TIMER_REBUILD); Rebuild(L"display settings changed"); }
         else if (w == TIMER_MENU && inMenu_) Tick(false);
+        else if (w == TIMER_TRAYCLICK) {
+            KillTimer(h, TIMER_TRAYCLICK);
+            // something else took the foreground since the click (user moved on): no stray menu
+            if (GetForegroundWindow() != trayFg_) Logf(L"TEST tray click menu cancelled (foreground changed)");
+            else if (!inMenu_) ShowMenu(&trayPt_);
+        }
         else if (w == TIMER_STARTHINT) {
             KillTimer(h, TIMER_STARTHINT);
             // one hint at start-up if something was left switched off by an earlier hotkey
@@ -1265,6 +1402,7 @@ LRESULT App::CtlProc(HWND h, UINT m, WPARAM w, LPARAM l)
         Logf(L"session change %u -> locked=%d", (unsigned)w, locked_ ? 1 : 0);
         if (locked_) ExitLightEdit(true);
         UpdateRunning();
+        SettingsUiRefresh();                    // its animation timer follows the lock state
         return 0;
     case WM_POWERBROADCAST:
         if (w == PBT_APMSUSPEND) { suspended_ = true; Logf(L"power: suspend"); UpdateRunning(); }

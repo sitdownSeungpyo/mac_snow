@@ -14,7 +14,7 @@ windows\build\WinterDesk.exe
 
 - 필요: Visual Studio Build Tools (C++ x64 도구, Windows 10/11 SDK). `build.ps1`은 `vswhere`로 MSVC를 찾아
   `vcvars64` 환경을 가져온 뒤 `cl.exe`로 빌드합니다 (`/O2 /std:c++17 /W4 /MT`, 정적 CRT라 exe 하나로 실행됨).
-- 실행하면 알림 영역(트레이)에 눈송이 아이콘이 생깁니다. 클릭하면 메뉴가 열립니다.
+- 실행하면 알림 영역(트레이)에 눈송이 아이콘이 생깁니다. 클릭하면 메뉴가 열리고, 더블클릭하면 설정 창이 열립니다.
 - 옵션
   - `--safe` : 안전 모드 — 이번 실행 동안만 Desktop 모드 + 창 위 눈/전구 끔 (저장된 설정 값은 그대로). 실행할 때 Shift를 누르고 있어도 같습니다.
     직전 실행이 10초 동안 정상 동작하기 전에 끝났거나(강제 종료·멈춤·재부팅) 워치독이 종료시켰다면 자동으로 안전 모드가 되고
@@ -27,6 +27,12 @@ windows\build\WinterDesk.exe
   - `--diag` : `%LOCALAPPDATA%\WinterDesk\Logs\diag-<시각>.csv` 에 창 눈 이벤트 CSV (grab / slideOff / regrow / liveFrame / fling …, 1초마다 기록).
 - 저장 위치 `%APPDATA%\WinterDesk\`: `settings.ini`, `gifts.txt`(선물), `riders.txt`(창 위 눈사람과 옷차림),
   `links.txt`(전구 연결, exe 이름 + 그 앱의 창 순번), `sentinel.txt`(안전 모드 판단용).
+  `WINTERDESK_DATA_DIR` 환경 변수가 있으면 그 폴더를 대신 씁니다 (테스트용).
+- `settings.ini`의 효과 값 (설정 창에서 바꾸는 값, 범위 밖이면 읽을 때 잘라냄, 100 = 원래 동작):
+  `SnowDensity`(25–250 %), `FlakeSize`(60–180 %), `FallSpeed`(40–250 %), `WindStrength`(0–300 %), `Accumulation`(0–300 %),
+  `SantaFrequency`(0 드물게 / 1 보통 / 2 자주), `SantaLandChance`(0–100 %), `GiftChance`(0–1000, 천분율 — 기본 67 ≈ 6.7%),
+  `SantaSpeed`(50–200 %), `PlowSpeed`(50–250 %), `TwinkleSpeed`(0–300 %, 0 = 깜빡이지 않음),
+  `LightStyle`(0 Multicolor / 1 Warm White / 2 Classic / 3 Icy / 4 Candy).
 
 ## 단축키 (어디서나)
 
@@ -39,6 +45,7 @@ windows\build\WinterDesk.exe
 | Ctrl+Alt+Shift+P | 제설차 켜기/끄기 |
 | Ctrl+Alt+Shift+L | 전구 연결하기 (편집 중 Esc로 종료, 30초 조작 없으면 자동 종료) |
 | Ctrl+Alt+Shift+G | Report a Glitch (최근 이벤트를 `%LOCALAPPDATA%\WinterDesk\Logs\glitch-*.csv`로 저장) |
+| Ctrl+Alt+Shift+O | 설정 창 열기 (이미 열려 있으면 앞으로, 보던 탭 그대로) |
 
 다른 앱이 이미 쓰고 있는 키는 조용히 건너뜁니다. AltGr 키보드 배열(독일어 등)에서는 Ctrl+Alt가 AltGr과 같아서
 Ctrl+Alt+Shift 조합이 그 배열의 문자 입력과 겹칠 수 있습니다 (한국어 배열은 문제없음).
@@ -60,15 +67,38 @@ Ctrl+Alt+Shift 조합이 그 배열의 문자 입력과 겹칠 수 있습니다 
   눈사람마다 저장(창 위 눈사람은 다음 실행에도 복원), ↺ 초기화, ✕ 또는 Esc로 닫기. 패널은 클릭하기 전까지 포커스를 가져가지 않습니다.
 - **삭제**: 눈덩이 위에 0.3초 올리면 ✕, 오른쪽 클릭 → "삭제". 선물은 마우스를 올리면 바로 ✕, 더블클릭하면 열림.
 - **산타**: 가끔 날아가고, 절반쯤은 작업 표시줄 눈 위에 내려앉아 미끄러지다 다시 날아오릅니다. 클릭하면 "Ho Ho Ho!" 말풍선과 선물,
-  드래그해서 옮기면 다시 날아갑니다. **자동 선물 확률**: 한 번 지나갈 때 6.7% (`kSantaGiftDropChance = 0.2 / 3`,
-  사용자 요청으로 mac의 20%의 1/3). 선물은 최대 30개, 최대 3단까지 쌓이고 저장됩니다.
+  드래그해서 옮기면 다시 날아갑니다. **자동 선물 확률**: 한 번 지나갈 때 기본 6.7% (`settings.ini`의 `GiftChance` 천분율, 기본 67 —
+  사용자 요청으로 mac의 20%의 1/3; 설정 창에서 0–100%로 바꿀 수 있음). 선물은 최대 30개, 최대 3단까지 쌓이고 저장됩니다.
 - **제설차**, **전구**: 창 가랜드(창마다 늘어진 줄 2~3개, 전구 간격 약 40pt — mac은 30pt), 가까운 창 사이 자동 전구 줄,
   직접 연결(금색 점 → 금색 점 드래그, 자석처럼 붙음, 안 되는 점은 빨간색, 줄 클릭 = 삭제, 최대 20줄, 안내 패널 + "알겠어요"),
-  Light Links (Automatic / Manual only — 첫 연결을 만들면 한 번 Manual only로), Window Garlands, Light Style (Multicolor / Warm White).
+  Light Links (Automatic / Manual only — 첫 연결을 만들면 한 번 Manual only로), Window Garlands,
+  Light Style (Multicolor / Warm White, Windows판에만 있는 Classic 빨강·초록·금색 / Icy 파랑·흰색·하늘색 / Candy 빨강·흰색·분홍).
 - **Mode**: On Top (모든 창 위, 클릭 통과) / Desktop (앱 창 뒤, 바탕화면 아이콘 위 — 오버레이를 데스크톱 아이콘 창(Progman) 바로 위에 유지).
   창 위 눈/전구는 On Top에서만 동작합니다.
 - 트레이 메뉴: mac 메뉴와 같은 항목 (Clear Snowballs & Snowmen, Clear Snowmen, Snowballs & Gifts, Report a Glitch, 절전 표시, Launch at Login 등).
   토스트 안내(화면 위 가운데, 클릭 통과)는 효과가 꺼져 있을 때도 보입니다.
+
+## 설정 창
+
+트레이 메뉴 맨 위 **⚙ 설정…**, 트레이 아이콘 더블클릭, 또는 **Ctrl+Alt+Shift+O**로 엽니다. 작업 표시줄 버튼과 Alt+Tab에 나오는
+보통 창이고(내장 디스플레이 가운데), 이미 열려 있으면 앞으로 가져오며 보던 탭을 그대로 둡니다. 컨트롤과 그림은 모두 Direct2D로 그립니다.
+
+| 탭 | 항목 |
+|---|---|
+| 눈 | 눈 내리기 켜기/끄기, 눈 강도 (가볍게 / 보통 / 펑펑), 눈송이 양 25–250%, 눈송이 크기 60–180%, 떨어지는 속도 40–250%, 바람 세기 0–300% (0 = 바람 없음), 쌓이는 속도 0–300% (0 = 안 쌓임) |
+| 산타 · 선물 | 산타 켜기/끄기, 등장 빈도 (드물게 / 보통 / 자주), 착륙 확률 0–100%, 선물 떨어뜨릴 확률 0–100% (0.1% 단위, 기본 6.7%), 비행 속도 50–200%, 제설차 켜기/끄기, 제설차 속도 50–250% |
+| 전구 | 창 전구, 창 가랜드, 전구 연결 (자동 / 수동), 전구 색상 5종 (고르면 트리 그림과 화면 전구에 바로 반영), 반짝임 속도 0–300% (0 = 고정), "전구 직접 연결하기…" 버튼 (편집이 실제로 시작되면 설정 창을 최소화) |
+| 창 효과 | 모드 (바탕화면 / 항상 위 — 안전 모드에서는 어느 쪽을 골라도 안전 모드가 끝남), 창 위 눈, 실시간 창 추적, 창 끌 때 눈 (미끄러짐 / 붙어 있음) |
+| 일반 | 로그인 시 자동 실행, 선물 추가, 정리하기 (눈덩이·눈사람 지우기 / 전부 지우기), 눈 초기화, 단축키 모음 |
+
+- 왼쪽 아래 **효과 켜기**는 Ctrl+Alt+Shift+E와 같습니다. 창 위 효과(전구·창 위 눈 등)는 '항상 위' 모드가 아니면 흐리게 비활성됩니다.
+- 바꾸는 즉시 화면에 반영됩니다 (슬라이더를 끄는 동안 0.1초마다 적용, `settings.ini`는 끄는 동안 최대 0.3초마다 + 놓을 때 저장).
+  트레이 메뉴나 단축키로 바꾼 값도 열린 설정 창에 바로 보입니다.
+- **기본값으로** (왼쪽 아래): 한 번 누르면 "한 번 더" 상태가 되고 3초 안에 다시 눌러야 되돌립니다. 효과 값(모든 슬라이더와 산타 등장 빈도)과
+  전구 색상만 기본값으로 돌아가고, 켜기/끄기와 모드는 그대로입니다. 지우기/눈 초기화 버튼도 같은 두 번 누르기 방식입니다.
+- 창이 앞에 있을 때만 약 30fps로 움직이고, 뒤에 있거나 최소화·다른 가상 데스크톱·화면 잠금 상태에서는 다시 그릴 일이 있을 때만 그립니다.
+- 한계: 키보드는 탭 이동(↑/↓, Tab/Shift+Tab), 스크롤(PgUp/PgDn/Home/End), Esc(닫기)만 됩니다. 개별 컨트롤로 포커스를 옮기거나
+  키보드로 조작하는 기능과 스크린 리더 지원은 없습니다.
 
 ## 작업 방해 없음
 
@@ -93,4 +123,5 @@ Ctrl+Alt+Shift 조합이 그 배열의 문자 입력과 겹칠 수 있습니다 
 `RegisterWindowMessage`로 등록한 이름의 메시지를 보냅니다: `WinterDesk.Test.State`(상태 로그), `WinterDesk.Test.Santa`(산타 바로 출발: wParam 0 무작위, 1 날아가기만, 2 착륙; lParam & 3: 1 오른쪽으로, 2 왼쪽으로, lParam >> 2: 비행 높이 화면 y),
 `WinterDesk.Test.Ball`(눈덩이 생성: wParam x, lParam 반지름 pt), `WinterDesk.Test.LightEdit`, `WinterDesk.Test.Command`(wParam = 메뉴 명령 id),
 `WinterDesk.Test.HitTest`(wParam x, lParam y), `WinterDesk.Test.Snowman`(꾸민 3단 눈사람: wParam 화면 x, lParam 의상 0-3),
-`WinterDesk.Test.Customize`(wParam 화면 x에 가장 가까운 눈사람의 꾸미기 패널 열기). 결과는 `--log` 로그에 `TEST`/`STATE` 줄로 남고, 플래그 없이 받으면 무시하고 그 사실만 기록합니다.
+`WinterDesk.Test.Customize`(wParam 화면 x에 가장 가까운 눈사람의 꾸미기 패널 열기),
+`WinterDesk.Test.Settings`(설정 창: wParam 탭 0–4로 열기/전환, lParam 1이면 닫기 — 열 때 컨트롤 위치를 클라이언트 px로 로그). 결과는 `--log` 로그에 `TEST`/`STATE` 줄로 남고, 플래그 없이 받으면 무시하고 그 사실만 기록합니다.

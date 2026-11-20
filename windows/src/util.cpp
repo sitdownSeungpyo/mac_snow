@@ -208,24 +208,55 @@ void Settings::Load()
         else if (k == "WindowLights") windowLights = b;
         else if (k == "LightLinksAuto") lightLinksAuto = b;
         else if (k == "WindowGarlands") windowGarlands = b;
-        else if (k == "LightStyle") lightStyle = v == 1 ? 1 : 0;
+        else if (k == "LightStyle") lightStyle = std::max(0, std::min(4, v));
         else if (k == "DragSnowSlides") dragSnowSlides = b;
         else if (k == "LiveTracking") liveTracking = b;
         else if (k == "ManualAfterFirstLinkDone") manualAfterFirstLinkDone = b;
+        else if (k == "SnowDensity") snowDensity = std::max(25, std::min(250, v));
+        else if (k == "FlakeSize") flakeSize = std::max(60, std::min(180, v));
+        else if (k == "FallSpeed") fallSpeed = std::max(40, std::min(250, v));
+        else if (k == "WindStrength") windStrength = std::max(0, std::min(300, v));
+        else if (k == "SantaFrequency") santaFrequency = std::max(0, std::min(2, v));
+        else if (k == "SantaLandChance") santaLandChance = std::max(0, std::min(100, v));
+        else if (k == "GiftChance") giftChance = std::max(0, std::min(1000, v));
+        else if (k == "SantaSpeed") santaSpeed = std::max(50, std::min(200, v));
+        else if (k == "PlowSpeed") plowSpeed = std::max(50, std::min(250, v));
+        else if (k == "TwinkleSpeed") twinkleSpeed = std::max(0, std::min(300, v));
+        else if (k == "Accumulation") accumulation = std::max(0, std::min(300, v));
     }
+}
+
+void Settings::ResetEffects()
+{
+    const Settings d;
+    snowDensity = d.snowDensity;
+    flakeSize = d.flakeSize;
+    fallSpeed = d.fallSpeed;
+    windStrength = d.windStrength;
+    santaFrequency = d.santaFrequency;
+    santaLandChance = d.santaLandChance;
+    giftChance = d.giftChance;
+    santaSpeed = d.santaSpeed;
+    plowSpeed = d.plowSpeed;
+    lightStyle = d.lightStyle;
+    twinkleSpeed = d.twinkleSpeed;
+    accumulation = d.accumulation;
 }
 
 void Settings::Save() const
 {
     std::wstring dir = AppDataDir();
     if (dir.empty()) return;
-    char buf[512];
+    char buf[1024];
     sprintf_s(buf,
               "EffectsOn=%d\nSnowFalling=%d\nIntensity=%d\nMode=%d\nSanta=%d\nSnowplow=%d\nWindowSnow=%d\nWindowLights=%d\n"
-              "LightLinksAuto=%d\nWindowGarlands=%d\nLightStyle=%d\nDragSnowSlides=%d\nLiveTracking=%d\nManualAfterFirstLinkDone=%d\n",
+              "LightLinksAuto=%d\nWindowGarlands=%d\nLightStyle=%d\nDragSnowSlides=%d\nLiveTracking=%d\nManualAfterFirstLinkDone=%d\n"
+              "SnowDensity=%d\nFlakeSize=%d\nFallSpeed=%d\nWindStrength=%d\nSantaFrequency=%d\nSantaLandChance=%d\nGiftChance=%d\n"
+              "SantaSpeed=%d\nPlowSpeed=%d\nTwinkleSpeed=%d\nAccumulation=%d\n",
               effectsOn ? 1 : 0, snowFalling ? 1 : 0, intensity, mode, santa ? 1 : 0, snowplow ? 1 : 0, windowSnow ? 1 : 0,
               windowLights ? 1 : 0, lightLinksAuto ? 1 : 0, windowGarlands ? 1 : 0, lightStyle, dragSnowSlides ? 1 : 0,
-              liveTracking ? 1 : 0, manualAfterFirstLinkDone ? 1 : 0);
+              liveTracking ? 1 : 0, manualAfterFirstLinkDone ? 1 : 0, snowDensity, flakeSize, fallSpeed, windStrength,
+              santaFrequency, santaLandChance, giftChance, santaSpeed, plowSpeed, twinkleSpeed, accumulation);
     if (!WriteIfChanged(dir + L"\\settings.ini", buf)) Logf(L"settings save failed");
 }
 

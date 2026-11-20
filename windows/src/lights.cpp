@@ -10,6 +10,15 @@ const int kMaxBulbs = 150;
 const int kMaxStrands = 40;
 const float kAnchorHitPt = 12, kSnapPt = 40, kStrandHitPt = 6;
 
+/// Bulb colour (index into kBulbColors) of bulb `k` for Settings::lightStyle: Multicolor, Warm White,
+/// Classic, Icy, Candy (settings_ui.cpp kPal mirrors this table).
+int BulbColor(int style, int k)
+{
+    static const struct { int n, c[5]; } kPalettes[5] = {{5, {0, 1, 2, 3, 4}}, {1, {5}}, {3, {0, 1, 3}}, {3, {2, 6, 7}}, {3, {0, 6, 8}}};
+    const auto& pal = kPalettes[std::max(0, std::min(4, style))];
+    return pal.c[std::max(0, k) % pal.n];
+}
+
 D2D1_POINT_2F Bez(D2D1_POINT_2F p0, D2D1_POINT_2F c, D2D1_POINT_2F p1, float t)
 {
     float u = 1 - t;
@@ -336,7 +345,7 @@ void Scene::DrawLights(Renderer& r)
         for (const auto& p : s.wire) dc->DrawLine(p.first, p.second, w, std::max(1.f, 1.3f * S), r.roundStroke.Get());
     }
     bulbList_.Clear();
-    float t = (float)time_;
+    float t = (float)twinkleT_;
     for (const Strand& s : strands_) {
         if (s.fade <= 0.05f) continue;
         bool round = s.index % 3 == 1;
@@ -350,7 +359,7 @@ void Scene::DrawLights(Renderer& r)
             int lvl = alpha > 0.74f ? 2 : (alpha > 0.58f ? 1 : 0);
             if (s.fade < 0.5f) lvl = 0;
             const AtlasSprite& sp = lantern ? r.lanterns[lvl]
-                                            : r.bulbs[settings_.lightStyle == 1 ? 5 : (int)((k + s.index) % 5)][round ? 1 : 0][lvl];
+                                            : r.bulbs[BulbColor(settings_.lightStyle, (int)(k + s.index))][round ? 1 : 0][lvl];
             bulbList_.Add(sp, s.bulbPts[k].x, s.bulbPts[k].y);
         }
     }
@@ -394,7 +403,7 @@ void Scene::DrawLightEdit(Renderer& r)
             dotList_.Clear();
             for (int k = 0; k < count; k++) {
                 D2D1_POINT_2F q = Bez(p0, cc, p1, (k + 0.5f) / count);
-                dotList_.Add(r.bulbs[k % 5][0][1], q.x, q.y - S);
+                dotList_.Add(r.bulbs[BulbColor(settings_.lightStyle, k)][0][1], q.x, q.y - S);
             }
             dotList_.Draw(r);
         }

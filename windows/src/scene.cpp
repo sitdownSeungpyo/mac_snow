@@ -720,8 +720,7 @@ Scene::Scene(const DisplayInfo& d, int groundLocalY, Settings& s, const std::vec
     : S(std::max(0.5f, d.scale)), W(d.bounds.right - d.bounds.left), H(d.bounds.bottom - d.bounds.top), disp_(d), settings_(s)
 {
     ground_.reset(new GroundSnow(W, (float)groundLocalY, S));
-    const float sz[4] = {2.2f, 3.f, 4.2f, 6.f};
-    for (int i = 0; i < 4; i++) flakeSizePx_[i] = std::max(2, (int)std::lround(sz[i] * S));
+    for (int i = 0; i < 4; i++) flakeSizePx_[i] = FlakePx(i, settings_.flakeSize, S);
     int target = settings_.snowFalling ? TargetFlakes() : 0;
     while ((int)flakes_.size() < target) flakes_.push_back(NewFlake(Rand(-20, (float)H)));
     bool hasDefault = false;
@@ -751,6 +750,9 @@ Scene::Scene(const DisplayInfo& d, int groundLocalY, Settings& s, const std::vec
     wantDefaultSnowman_ = wantDefaultSnowman;
     santa_.timer = 4;
     if (settings_.snowplow) EnsurePlow(true);
+    lastSanta_ = settings_.santa;
+    lastPlow_ = settings_.snowplow;
+    lastStrandOpts_ = settings_.lightStyle * 4 + (settings_.lightLinksAuto ? 2 : 0) + (settings_.windowGarlands ? 1 : 0);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -812,9 +814,13 @@ void Scene::SettingsChanged()
         if (held_.kind == KSanta) held_ = Ref();
         santa_.fadingOut = true;               // fades out over 0.5 s, then waits
     }
-    if (settings_.santa && santa_.phase == SantaObj::Waiting && santa_.timer > 3) santa_.timer = 3;
-    EnsurePlow(settings_.snowplow);
-    strandSig_.clear();
+    // only a santa off -> on switch brings him soon; knob tweaks (settings window, every 100 ms) do not
+    if (settings_.santa && !lastSanta_ && santa_.phase == SantaObj::Waiting && santa_.timer > 3) santa_.timer = 3;
+    lastSanta_ = settings_.santa;
+    if (settings_.snowplow != lastPlow_) { lastPlow_ = settings_.snowplow; EnsurePlow(settings_.snowplow); }
+    // flake sizes follow the atlas in PrepareCaches; strands rebuild only when their options change
+    int strandOpts = settings_.lightStyle * 4 + (settings_.lightLinksAuto ? 2 : 0) + (settings_.windowGarlands ? 1 : 0);
+    if (strandOpts != lastStrandOpts_) { lastStrandOpts_ = strandOpts; strandSig_.clear(); }
     needsRedraw = true;
 }
 
@@ -918,7 +924,7 @@ std::wstring Scene::StateLine() const
 {
     wchar_t b[256];
     std::wstring s;
-    swprintf_s(b, L"santa phase=%d x=%.0f y=%.0f dir=%.0f; ", santa_.phase, santa_.x, santa_.VisualY(S), santa_.dir);
+    swprintf_s(b, L"santa phase=%d x=%.0f y=%.0f dir=%.0f timer=%.1f; ", santa_.phase, santa_.x, santa_.VisualY(S), santa_.dir, santa_.timer);
     s += b;
     s += L"balls=";
     for (const auto& bp : balls_) {
@@ -1130,7 +1136,8 @@ int Scene::TargetFlakes() const
 {
     const int base[3] = {70, 150, 300};
     float area = (W / S) * (H / S) / (1440.f * 900.f);
-    return std::min(450, (int)(base[std::max(0, std::min(2, settings_.intensity))] * std::max(0.5f, area)));
+    int d = settings_.snowDensity, cap = std::min(900, 450 * d / 100);
+    return std::min(cap, (int)(base[std::max(0, std::min(2, settings_.intensity))] * d / 100 * std::max(0.5f, area)));
 }
 
 Flake Scene::NewFlake(float y)
@@ -1167,13 +1174,14 @@ void Scene::Update(double dt)
 {
     time_ += dt;
     float fdt = (float)dt;
-    wind_ = (float)(std::sin(time_ * 0.13) * 10 + std::sin(time_ * 0.37) * 4) * S;
+    wind_ = (float)(std::sin(time_ * 0.13) * 10 + std::sin(time_ * 0.37) * 4) * S * (settings_.windStrength / 100.f);
+    twinkleT_ += dt * (settings_.twinkleSpeed / 100.0);
     anyMoving_ = false;
     capsChanged_ = false;
 
     // accumulation (Intensity.accumulation; caps at 1/4 of it): very slow, independent of flakes
     if (settings_.snowFalling) {
-        float rate = kAccumulation[std::max(0, std::min(2, settings_.intensity))];
+        float rate = kAccumulation[std::max(0, std::min(2, settings_.intensity))] * (settings_.accumulation / 100.f);
         static float groundBudget = 0;
         groundBudget += rate * S * fdt * ground_->n;
         float lump = 0.6f * S;
@@ -1263,11 +1271,12 @@ void Scene::Update(double dt)
 void Scene::UpdateFlakes(float dt)
 {
     int target = settings_.snowFalling ? TargetFlakes() : 0;
+    float fall = settings_.fallSpeed / 100.f;
     for (size_t i = flakes_.size(); i-- > 0;) {
         Flake& f = flakes_[i];
         float oy = f.y;
         f.phase += dt * 1.3f;
-        f.y += f.vy * dt;
+        f.y += f.vy * fall * dt;
         f.x += (wind_ + std::cos(f.phase) * f.sway) * dt;
         bool gone = false;
         if (CapsActive())
@@ -1848,12 +1857,12 @@ void Scene::StartSantaPass()
     forceSantaY_ = 0;
     s.x = s.dir > 0 ? -210 * S : W + 210 * S;
     s.y = s.cruiseY;
-    s.velocity = 150 * S;
-    s.willLand = forceSantaLand_ >= 0 ? forceSantaLand_ == 1 : Rand01() < 0.5;
+    s.velocity = 150 * S * (settings_.santaSpeed / 100.f);
+    s.willLand = forceSantaLand_ >= 0 ? forceSantaLand_ == 1 : Rand01() < settings_.santaLandChance / 100.0;
     forceSantaLand_ = -1;
     float touchdown = s.dir > 0 ? W * 0.2f : W * 0.8f;
     s.descendStartX = touchdown - s.dir * 320 * S;
-    s.dropPlanned = Rand01() < kSantaGiftDropChance;
+    s.dropPlanned = Rand01() < settings_.giftChance / 1000.0;
     s.dropX = Rand(W * 0.15f, W * 0.85f);
     s.phase = SantaObj::Flying;
     s.alpha = 1;
@@ -1939,7 +1948,7 @@ void Scene::UpdateSanta(double dt)
         break;
     }
     case SantaObj::Ascending: {
-        s.velocity = std::min(150 * S, s.velocity + 60 * S * fdt);
+        s.velocity = std::min(150 * S * (settings_.santaSpeed / 100.f), s.velocity + 60 * S * fdt);
         s.x += s.dir * s.velocity * fdt;
         float p = std::min(1.f, std::fabs(s.x - s.startX) / (380 * S));
         s.y = s.startY + (H * 0.28f - s.startY) * Smooth(p);
@@ -1968,7 +1977,12 @@ void Scene::UpdateSanta(double dt)
         s.spTint[k] = k % 3 == 0 ? 0 : 1;
     }
     bool off = s.dir > 0 ? s.x - 70 * S > W : s.x + 70 * S < 0;
-    if (off) { s.phase = SantaObj::Waiting; s.timer = Rand(20, 45); s.bubbleT = -1; }
+    if (off) {
+        int fq = settings_.santaFrequency;                    // 0 rare, 1 normal, 2 often
+        s.phase = SantaObj::Waiting;
+        s.timer = fq == 0 ? Rand(50, 100) : (fq == 2 ? Rand(8, 18) : Rand(20, 45));
+        s.bubbleT = -1;
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1988,7 +2002,7 @@ void Scene::UpdatePlow(float dt)
         if (p->y >= surf) { p->y = surf; p->vy = 0; p->airborne = false; }
         return;
     }
-    p->x += p->dir * 26 * S * dt;                           // WinterScene.plowSpeed
+    p->x += p->dir * 26 * S * (settings_.plowSpeed / 100.f) * dt;   // WinterScene.plowSpeed
     float blade = p->BladeX(S);
     p->drift += ground_->Scrape(blade, ground_->colW * 0.6f, 2 * S);
     float target = ground_->SurfaceY(p->x);
@@ -2209,6 +2223,15 @@ void Scene::DrawGift(Renderer& r, const GiftObj& g)
 
 void Scene::PrepareCaches(Renderer& r)
 {
+    // flake size knob: re-render the atlas (a failure retries at most every 2 s, the old atlas stays)
+    if (r.flakePct != settings_.flakeSize && NowSec() >= r.atlasRetryAt && !r.CreateAtlas(settings_.flakeSize)) {
+        r.atlasRetryAt = NowSec() + 2;
+        Logf(L"flake atlas rebuild failed (retry in 2 s)");
+    }
+    if (!std::equal(flakeSizePx_, flakeSizePx_ + 4, r.flakeSizes)) {   // follow what the atlas actually has
+        std::copy(r.flakeSizes, r.flakeSizes + 4, flakeSizePx_);
+        for (Flake& f : flakes_) f.size = flakeSizePx_[f.sprite / 3];
+    }
     ID2D1DeviceContext1* dc = r.dc.Get();
     for (auto& rootp : balls_) {
         if (rootp->below) continue;

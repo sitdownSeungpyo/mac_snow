@@ -30,8 +30,13 @@ using Microsoft::WRL::ComPtr;
 
 constexpr float kPi = 3.14159265f;
 
-/// Santa's automatic gift drop chance per pass (user request: one third of the mac's 20%).
-constexpr double kSantaGiftDropChance = 0.2 / 3.0;
+/// Falling flake sprite size `i` (0..3) in px: pt table x S x Settings::flakeSize % (scene and atlas share it).
+inline int FlakePx(int i, int pct, float S)
+{
+    const float sz[4] = {2.2f, 3.f, 4.2f, 6.f};
+    return std::max(2, (int)std::lround(sz[i] * S * (pct / 100.f)));
+}
+constexpr int kBulbColorCount = 9;    // render.cpp kBulbColors (palettes in lights.cpp)
 
 // ---------------------------------------------------------------------------------------------
 // util.cpp: log, random, settings, persistence, launch-at-login, diag CSV, glitch ring, sentinel
@@ -61,15 +66,29 @@ struct Settings {
     bool windowLights = true;
     bool lightLinksAuto = true;       // automatic strands between nearby windows
     bool windowGarlands = true;
-    int lightStyle = 0;               // 0 Multicolor, 1 Warm White
+    int lightStyle = 0;               // 0 Multicolor, 1 Warm White, 2 Classic, 3 Icy, 4 Candy
     bool dragSnowSlides = true;       // "창 끌 때 눈": slides off (true) / stays (false)
     bool liveTracking = true;         // caps / riders / lights follow a window while it is dragged
     bool manualAfterFirstLinkDone = false;
+    // effect tuning (percent unless noted; 100 = the original behaviour)
+    int snowDensity = 100;            // 25..250 falling flake count
+    int flakeSize = 100;              // 60..180
+    int fallSpeed = 100;              // 40..250
+    int windStrength = 100;           // 0..300
+    int santaFrequency = 1;           // 0 rare, 1 normal, 2 often
+    int santaLandChance = 50;         // 0..100
+    int giftChance = 67;              // per-mille 0..1000 auto gift drop per pass (~ mac 20% / 3)
+    int santaSpeed = 100;             // 50..200
+    int plowSpeed = 100;              // 50..250
+    int twinkleSpeed = 100;           // 0..300 (0 = steady)
+    int accumulation = 100;           // 0..300 ground + window cap growth
     bool safeMode = false;            // not persisted: nothing is saved this session
     std::wstring safeReason;
     /// Safe mode is a runtime mask (Desktop mode, no window snow / lights); the saved values stay the user's.
     bool WindowFeatures() const { return !safeMode && mode == ModeOnTop; }
     int EffMode() const { return safeMode ? ModeDesktop : mode; }
+    /// Restores the effect tuning (incl. light style) to defaults; toggles / mode stay.
+    void ResetEffects();
     void Load();
     void Save() const;
 };
@@ -229,13 +248,18 @@ public:
     ComPtr<ID2D1Bitmap1> atlas;
     AtlasSprite flakes[12];                // 4 sizes x 3 alphas
     int flakeSizes[4] = {};
-    AtlasSprite bulbs[6][2][3];            // colour (5 = warm white) x shape (teardrop, round) x brightness
+    AtlasSprite bulbs[kBulbColorCount][2][3];   // colour (5 = warm white) x shape (teardrop, round) x brightness
     AtlasSprite lanterns[3];               // amber paper lantern x brightness
     AtlasSprite sparkles[2][4];            // 2 tints x 4 alphas
     AtlasSprite goldDot, goldDotBig, redDot, goldGlow;   // light-edit anchors
     AtlasSprite grain, puff;               // sand-like snow grains, poof flakes
     Sprite gifts[4], plow, plowGlow, santaBody, santaHead, santaEyes, santaArm;
     Sprite legNear, legFar, deerBody, headLead, headPlain, noseGlow, reins;
+    int flakePct = 100;                    // Settings::flakeSize the atlas was built with (set before Init)
+    double atlasRetryAt = 0;               // NowSec() before which a failed atlas rebuild is not retried
+    /// Re-renders the sprite atlas (flakes at `pct`); outside BeginFrame/EndFrame only. On failure the
+    /// old atlas, flakePct and flakeSizes stay.
+    bool CreateAtlas(int pct);
 
 private:
     bool CreateArt();
@@ -286,6 +310,35 @@ bool CustomizeVisible();
 void ValidateCustomize();
 HWND CustomizeHwnd();
 HWND ToastHwnd();
+
+// ---------------------------------------------------------------------------------------------
+// settings_ui.cpp: the "WinterDesk 설정" window (top-level, taskbar button, custom drawn)
+// ---------------------------------------------------------------------------------------------
+/// Actions the settings window asks the app to run (mapped onto the tray menu commands).
+enum SettingsCmd {
+    SC_Effects = 0, SC_Snow, SC_Santa, SC_Plow, SC_WinSnow, SC_Lights, SC_Live, SC_Garlands, SC_Login, SC_EditLights,
+    SC_AddGift, SC_ClearBalls, SC_ClearAll, SC_ResetSnow, SC_ModeDesktop, SC_ModeOnTop, SC_LinksAuto, SC_LinksManual,
+    SC_DragSlides, SC_DragStays, SC_ResetEffects,
+};
+struct SettingsUiHost {
+    Settings* settings = nullptr;
+    RECT work{};                       // internal display work area (screen px): placement
+    HICON iconBig = nullptr, iconSmall = nullptr;
+    bool test = false;                 // --test: log control positions (automation)
+    std::function<void(int)> command;  // SettingsCmd
+    std::function<void(bool save)> apply;   // a knob changed: scene now (+ settings.ini when save)
+    std::function<bool()> canAddGift;
+    std::function<bool()> canEditLights;   // a scene exists, not locked / suspended, effects on, not safe mode
+    std::function<bool()> enterLightEdit;  // starts Light Edit (never toggles it off); true when it is on
+    std::function<bool()> paused;      // session locked / suspended: no animation timer
+    std::function<void()> pump;        // runs the overlay during modal loops (window drag, system menu)
+};
+/// Opens the window on `tab` (0 snow, 1 santa, 2 lights, 3 windows, 4 general; -1 keeps an open
+/// window's tab, 0 for a new one); focuses an open one.
+void ShowSettingsUi(const SettingsUiHost& h, int tab);
+void CloseSettingsUi();
+void SettingsUiRefresh();              // settings changed elsewhere (tray / hotkeys): redraw
+HWND SettingsUiHwnd();                 // null when closed
 
 // ---------------------------------------------------------------------------------------------
 // scene.cpp / lights.cpp: ground snow, window caps, grains, actors, lights, input
@@ -697,6 +750,7 @@ private:
     std::vector<FloatText> texts_;
     double time_ = 0, relaxTimer_ = 0;
     float wind_ = 0;
+    double twinkleT_ = 0;                  // light twinkle clock (time_ x Settings::twinkleSpeed)
     bool anyMoving_ = false;
     bool capsChanged_ = false;
     bool wantDefaultSnowman_ = false;
@@ -704,6 +758,9 @@ private:
     float forceSantaY_ = 0;                         // test hook
     bool liveDragging_ = false;
     int flakeSizePx_[4] = {2, 3, 4, 6};
+    // SettingsChanged: last applied values (only a real change does its work)
+    bool lastSanta_ = true, lastPlow_ = false;
+    int lastStrandOpts_ = -1;
 
     // live drag tracking (one window at a time: the one being moved)
     HWND liveHwnd_ = nullptr;
