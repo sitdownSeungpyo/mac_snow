@@ -232,7 +232,7 @@ final class Santa: SKNode {
             touchdown = dir > 0 ? size.width * 0.2 : size.width * 0.8
         }
         descendStartX = touchdown - dir * descendLength
-        giftDropX = CGFloat.random(in: 0...1) < 0.6 ? CGFloat.random(in: (size.width * 0.15)...(size.width * 0.85)) : nil
+        giftDropX = CGFloat.random(in: 0...1) < 0.2 ? CGFloat.random(in: (size.width * 0.15)...(size.width * 0.85)) : nil
         phase = .flying
         isHidden = false
         lastHeadY = nil
